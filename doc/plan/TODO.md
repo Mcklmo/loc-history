@@ -24,7 +24,8 @@ then a commit.
       dirs, tolerant error policy with `--fail-fast` opt-in, sink closed exactly once on every
       path. 14 tests; the ordering test was mutation-checked (removing the buffer fails it) and
       passes under `-race`.
-- [ ] 6. `main.go` — flags and wiring, first real run
+- [x] **6. `main.go`** — flag parsing with validation, sink wiring, `VerifyMount` preflight,
+      signal-cancellable walk, run summary. 13 tests. First real containerised run done.
 - [ ] 7. `cache`
 - [ ] 8. `FileWriter`
 - [ ] 9. `GraphWriter`
@@ -43,6 +44,10 @@ Verified against the real image, not assumed:
 - **A nonexistent path returns that same `{}` with exit 0.** So does an empty bind mount —
   which is exactly the macOS trap in §5, and why the mount check cannot be a per-commit
   heuristic. It is a startup canary with a known answer instead (`VerifyMount`).
+- **The macOS bind-mount trap did not reproduce.** Docker Desktop 29.6.2 mounts a
+  `/var/folders/…` temp directory correctly — cloc counted through it. The `VerifyMount`
+  canary is kept anyway: it costs one container at startup and it guards against a
+  *silently wrong answer*, which is the failure mode worth paying for.
 - **The image is amd64-only**; on Apple silicon every container runs under emulation, so the
   per-container cost the brief budgets for is if anything understated.
 - **Mount point is `/loc`, not `/tmp`.** Mounting over the container's own temp directory
@@ -55,4 +60,7 @@ Verified against the real image, not assumed:
   anchor. The user has since ruled that repo out of scope. Correctness is therefore anchored on
   **synthetic fixture repos built in `t.TempDir()`**, where the expected counts are constructed
   rather than observed, plus smoke runs against this repo itself.
+- **New correctness anchor.** At `f73ea3b`, `--folder=internal --test-regex='_test\.go$'`
+  reports 935 product / 1392 test / 2327 total. Independently confirmed by extracting the
+  tree by hand and running the three cloc queries directly: 935 + 1392 = 2327.
 - **Location.** Standalone module at the repo root, not `tools/loc-history/` inside a host repo.
