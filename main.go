@@ -51,10 +51,11 @@ type config struct {
 	Folder    string
 	TestRegex string
 
-	Out        []string
-	FileOut    string
-	FileFormat writer.Format
-	GraphOut   string
+	Out         []string
+	FileOut     string
+	FileFormat  writer.Format
+	GraphOut    string
+	Granularity writer.Granularity
 
 	Jobs        int
 	WorkDir     string
@@ -72,7 +73,7 @@ var knownSinks = map[string]bool{"console": true, "file": true, "graph": true}
 
 func parseFlags(args []string, errOut io.Writer) (config, error) {
 	var cfg config
-	var out, fileFormat string
+	var out, fileFormat, granularity string
 
 	fs := flag.NewFlagSet("loc-history", flag.ContinueOnError)
 	fs.SetOutput(errOut)
@@ -85,6 +86,7 @@ func parseFlags(args []string, errOut io.Writer) (config, error) {
 	fs.StringVar(&cfg.FileOut, "file-out", "loc-history.csv", "path for the file sink")
 	fs.StringVar(&fileFormat, "file-format", "csv", "file sink format: csv or ndjson")
 	fs.StringVar(&cfg.GraphOut, "graph-out", "loc-history.html", "path for the graph sink")
+	fs.StringVar(&granularity, "granularity", "hour", "graph time bucket: hour or day")
 	fs.IntVar(&cfg.Jobs, "jobs", 4, "commits processed concurrently")
 	fs.StringVar(&cfg.WorkDir, "work-dir", "/tmp",
 		"scratch root; must be a path Docker is allowed to bind-mount")
@@ -129,6 +131,12 @@ func parseFlags(args []string, errOut io.Writer) (config, error) {
 	}
 	cfg.FileFormat = format
 
+	gran, err := ParseGranularity(granularity)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.Granularity = gran
+
 	return cfg, nil
 }
 
@@ -150,6 +158,16 @@ func ParseFileFormat(s string) (writer.Format, error) {
 		return 0, fmt.Errorf("-file-format: %w", err)
 	}
 	return f, nil
+}
+
+// ParseGranularity validates the graph's time bucket at the flag layer, for the
+// same reason as ParseFileFormat.
+func ParseGranularity(s string) (writer.Granularity, error) {
+	g, err := writer.ParseGranularity(s)
+	if err != nil {
+		return 0, fmt.Errorf("-granularity: %w", err)
+	}
+	return g, nil
 }
 
 // graphSubtitle says what was counted, so a saved page is still legible a
@@ -219,8 +237,9 @@ func execute(ctx context.Context, cfg config, runner cloc.Runner, stdout, stderr
 			sinks = append(sinks, f)
 		case "graph":
 			g, err := writer.NewGraph(cfg.GraphOut, writer.GraphOptions{
-				Title:    "loc-history",
-				Subtitle: graphSubtitle(cfg),
+				Title:       "loc-history",
+				Subtitle:    graphSubtitle(cfg),
+				Granularity: cfg.Granularity,
 			})
 			if err != nil {
 				writer.MultiWriter(sinks...).Close()

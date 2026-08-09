@@ -22,19 +22,19 @@ const (
 	gutterLeft  = 46 // y tick labels
 	gutterRight = 8
 	gutterTop   = 10
-	// axisBand is deep enough that the month labels read as their own band
-	// rather than running on from the bottom tick label.
+	// axisBand is deep enough that the x labels read as their own band rather
+	// than running on from the bottom tick label.
 	axisBand = 22
 
 	plotWidth  = chartWidth - gutterLeft - gutterRight
 	plotHeight = chartHeight - gutterTop - axisBand
 	plotRight  = chartWidth - gutterRight
-	// arm is half the plot: the axis is symmetric about zero, so a -500 day is
-	// exactly as tall as a +500 day.
-	arm         = plotHeight / 2
-	zeroY       = gutterTop + arm
-	tickLabelX  = gutterLeft - 8
-	monthLabelY = chartHeight - 5
+	// arm is half the plot: the axis is symmetric about zero, so a -500 bucket
+	// is exactly as tall as a +500 bucket.
+	arm        = plotHeight / 2
+	zeroY      = gutterTop + arm
+	tickLabelX = gutterLeft - 8
+	xLabelY    = chartHeight - 5
 
 	// barGap is the surface gap that separates adjacent columns. Below
 	// minGapPitch it is dropped, so a dense history reads as a continuous
@@ -43,20 +43,103 @@ const (
 	minGapPitch = 4
 	maxBarWidth = 24 // a column never fills its slot; the leftover is air
 
-	// A month label claims the room its own text needs, in user units at 10px,
-	// so a wide "Jan 2006" does not crowd the "Feb" behind it.
-	monthGap     = 34
-	yearMonthGap = 60
+	// An hourly year is 8,760 slots across a 898-unit plot, which puts a column
+	// well under a pixel. These floors keep a sparse history visible and
+	// hoverable at any span; a genuinely dense stretch merges into a silhouette,
+	// which is the honest reading of it.
+	minBarWidth = 1
+	minHitWidth = 4
+
+	// maxAxisLabels is how many x labels the axis will consider before dropping
+	// to a coarser unit. Claiming thins whatever survives, so this is a bound on
+	// candidates rather than on labels drawn.
+	maxAxisLabels = 20
 )
 
-// GraphOptions labels the page.
-type GraphOptions struct {
-	Title    string
-	Subtitle string
+// Granularity is the slice of time one column covers.
+type Granularity int
+
+const (
+	// GranularityHour buckets commits by the hour they landed. It is the
+	// default: a day-wide bucket collapses a whole afternoon of work into a
+	// single column, which on a young repo is the whole history.
+	GranularityHour Granularity = iota + 1
+	GranularityDay
+)
+
+// ParseGranularity converts a --granularity value.
+func ParseGranularity(s string) (Granularity, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "hour":
+		return GranularityHour, nil
+	case "day":
+		return GranularityDay, nil
+	default:
+		return 0, fmt.Errorf("unknown granularity %q; want hour or day", s)
+	}
 }
 
-// Graph renders daily net change in lines of code — one diverging column chart
-// for product files, one for test files — to a self-contained HTML file.
+// step is how much time one slot on the x axis covers.
+func (g Granularity) step() time.Duration {
+	if g == GranularityDay {
+		return 24 * time.Hour
+	}
+	return time.Hour
+}
+
+// truncate is the single point at which a timestamp becomes a bucket. It reads
+// the wall clock in the commit's own zone — git hands back %cI with its offset
+// intact — and relabels that as UTC. So a commit at 23:00+02:00 buckets on its
+// author's own evening, and because every bucket time is UTC, the arithmetic
+// downstream is exact: no DST discontinuity can shorten a step.
+func (g Granularity) truncate(t time.Time) time.Time {
+	hour := t.Hour()
+	if g == GranularityDay {
+		hour = 0
+	}
+	return time.Date(t.Year(), t.Month(), t.Day(), hour, 0, 0, 0, time.UTC)
+}
+
+// noun names a bucket in prose, column heads its table.
+func (g Granularity) noun() string {
+	if g == GranularityDay {
+		return "day"
+	}
+	return "hour"
+}
+
+func (g Granularity) column() string {
+	if g == GranularityDay {
+		return "Date"
+	}
+	return "Hour"
+}
+
+// titleFormat stamps a tooltip, rowFormat a table cell.
+func (g Granularity) titleFormat() string {
+	if g == GranularityDay {
+		return "Mon 2006-01-02"
+	}
+	return "Mon 2006-01-02 15:04"
+}
+
+func (g Granularity) rowFormat() string {
+	if g == GranularityDay {
+		return "2006-01-02"
+	}
+	return "2006-01-02 15:04"
+}
+
+// GraphOptions labels the page and picks how wide one column is.
+type GraphOptions struct {
+	Title       string
+	Subtitle    string
+	Granularity Granularity
+}
+
+// Graph renders net change in lines of code per time bucket — one diverging
+// column chart for product files, one for test files — to a self-contained
+// HTML file.
 //
 // It buffers: the two charts share one y scale computed over the whole history,
 // so no column can be drawn until the last record has arrived. A few thousand
@@ -71,6 +154,9 @@ type Graph struct {
 func NewGraph(path string, opts GraphOptions) (*Graph, error) {
 	if opts.Title == "" {
 		opts.Title = "loc-history"
+	}
+	if opts.Granularity == 0 {
+		opts.Granularity = GranularityHour
 	}
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -118,12 +204,18 @@ type pageData struct {
 	Subtitle string
 	Empty    bool
 
-	Frame   frame
-	Tiles   []tile
-	Charts  []chart
-	Key     []legendSwatch
-	DayRows []dayRow
-	Rows    []tableRow
+	// BucketNoun and BucketColumn name the time slice in prose and in the
+	// table head. Both tables render outside the empty-history branch, so both
+	// are set before build can return early.
+	BucketNoun   string
+	BucketColumn string
+
+	Frame      frame
+	Tiles      []tile
+	Charts     []chart
+	Key        []legendSwatch
+	BucketRows []bucketRow
+	Rows       []tableRow
 }
 
 // frame is the fixed SVG geometry, handed to the template so the markup does
@@ -135,7 +227,7 @@ type frame struct {
 	PlotTop       int
 	PlotHeight    int
 	TickLabelX    int
-	MonthLabelY   int
+	XLabelY       int
 }
 
 type tile struct {
@@ -151,11 +243,11 @@ type chart struct {
 	Bars      []bar
 	Hits      []hit
 	YTicks    []yTick
-	Months    []monthLabel
+	XLabels   []xLabel
 }
 
-// bar is one day's net change, drawn up from the zero line where the tree grew
-// and down where it shrank.
+// bar is one bucket's net change, drawn up from the zero line where the tree
+// grew and down where it shrank.
 //
 // The skill's 4px rounded data-end is deliberately dropped: a dense history
 // puts columns well under 4 units wide, and a corner radius wider than the bar
@@ -168,9 +260,9 @@ type bar struct {
 	H     string
 }
 
-// hit is a transparent full-height target over one commit-bearing day. It is
+// hit is a transparent full-height target over one commit-bearing bucket. It is
 // wider than the column it covers, and both charts carry the same title text,
-// so either one gives the whole day's context.
+// so either one gives the whole bucket's context.
 type hit struct {
 	X     string
 	W     string
@@ -184,7 +276,7 @@ type yTick struct {
 	Text   string
 }
 
-type monthLabel struct {
+type xLabel struct {
 	X    string
 	Text string
 }
@@ -194,8 +286,8 @@ type legendSwatch struct {
 	Label string
 }
 
-type dayRow struct {
-	Date    string
+type bucketRow struct {
+	When    string
 	Commits string
 	Product string
 	Test    string
@@ -212,9 +304,9 @@ type tableRow struct {
 	Delta   string
 }
 
-// day aggregates every commit landing on one calendar date.
-type day struct {
-	date     time.Time
+// bucket aggregates every commit landing in one slice of time.
+type bucket struct {
+	start    time.Time
 	product  int
 	test     int
 	total    int
@@ -222,15 +314,33 @@ type day struct {
 	subjects []string
 }
 
+// axis is the x geometry the two charts share. Sharing it is what keeps the
+// small multiples comparable: same first slot, same pitch, same y scale.
+type axis struct {
+	first time.Time
+	span  int
+	pitch float64
+	yMax  int
+	gran  Granularity
+}
+
+// at is the start of the i-th slot. Every bucket time is UTC, so this is exact.
+func (a axis) at(i int) time.Time {
+	return a.first.Add(time.Duration(i) * a.gran.step())
+}
+
 func (g *Graph) build() pageData {
+	gran := g.opts.Granularity
 	p := pageData{
-		Title:    g.opts.Title,
-		Subtitle: g.opts.Subtitle,
+		Title:        g.opts.Title,
+		Subtitle:     g.opts.Subtitle,
+		BucketNoun:   gran.noun(),
+		BucketColumn: gran.column(),
 		Frame: frame{
 			Width: chartWidth, Height: chartHeight,
 			PlotLeft: gutterLeft, PlotRight: plotRight,
 			PlotTop: gutterTop, PlotHeight: plotHeight,
-			TickLabelX: tickLabelX, MonthLabelY: monthLabelY,
+			TickLabelX: tickLabelX, XLabelY: xLabelY,
 		},
 	}
 
@@ -251,28 +361,33 @@ func (g *Graph) build() pageData {
 		return p
 	}
 
-	days, order := groupByDay(g.records)
+	buckets, order := groupByBucket(g.records, gran)
 	p.Tiles = buildTiles(g.records, order)
-	p.DayRows = buildDayRows(days, order)
+	p.BucketRows = buildBucketRows(buckets, order, gran)
 
-	first := order[0]
-	span := axisSpan(first, order[len(order)-1])
-
-	// One scale for both charts, so a +2000 product day is visibly ten times a
-	// +200 test day.
+	// One scale for both charts, so a +2000 product bucket is visibly ten times
+	// a +200 test bucket.
 	var peak int
-	for _, d := range days {
-		peak = max(peak, abs(d.product), abs(d.test))
+	for _, b := range buckets {
+		peak = max(peak, abs(b.product), abs(b.test))
 	}
-	yMax := niceMax(peak)
 
+	ax := axis{
+		first: order[0],
+		span:  axisSpan(order[0], order[len(order)-1], gran),
+		yMax:  niceMax(peak),
+		gran:  gran,
+	}
+	ax.pitch = float64(plotWidth) / float64(ax.span)
+
+	noun := gran.noun()
 	p.Charts = []chart{
 		buildChart("Product files",
-			"Column chart of the net change in product lines of code each day. The same values are listed in the by-day table below.",
-			days, first, span, yMax, func(d *day) int { return d.product }),
+			fmt.Sprintf("Column chart of the net change in product lines of code each %s. The same values are listed in the by-%s table below.", noun, noun),
+			buckets, ax, func(b *bucket) int { return b.product }),
 		buildChart("Test files",
-			"Column chart of the net change in test lines of code each day, on the same scale as the product chart. The same values are listed in the by-day table below.",
-			days, first, span, yMax, func(d *day) int { return d.test }),
+			fmt.Sprintf("Column chart of the net change in test lines of code each %s, on the same scale as the product chart. The same values are listed in the by-%s table below.", noun, noun),
+			buckets, ax, func(b *bucket) int { return b.test }),
 	}
 	p.Key = []legendSwatch{
 		{Class: "added", Label: "added"},
@@ -291,47 +406,48 @@ func countCell(r report.Record, n int) string {
 	return fmt.Sprintf("%d", n)
 }
 
-func dateKey(t time.Time) string { return t.Format("2006-01-02") }
+// bucketKey identifies a bucket by its start. Truncation has already chosen the
+// bucket, so one format serves every granularity.
+func bucketKey(t time.Time) string { return t.Format(time.RFC3339) }
 
-// groupByDay sums the per-category deltas of every commit sharing a calendar
-// date, and returns the dates in chronological order.
+// groupByBucket sums the per-category deltas of every commit sharing a bucket,
+// and returns the bucket starts in chronological order.
 //
 // The deltas come from the cloc snapshots the pipeline already produced, not
 // from a diff. prevProduct/prevTest start at zero — including across Skipped
 // commits, whose counts are zero — mirroring Finalize's prevTotal convention,
 // which is what makes productΔ + testΔ == Delta hold for every record.
-func groupByDay(records []report.Record) (map[string]*day, []time.Time) {
-	days := make(map[string]*day, len(records))
+func groupByBucket(records []report.Record, g Granularity) (map[string]*bucket, []time.Time) {
+	buckets := make(map[string]*bucket, len(records))
 	var order []time.Time
 	prevProduct, prevTest := 0, 0
 
 	for _, r := range records {
-		date := time.Date(r.Timestamp.Year(), r.Timestamp.Month(), r.Timestamp.Day(),
-			0, 0, 0, 0, time.UTC)
-		key := dateKey(date)
-		d, ok := days[key]
+		start := g.truncate(r.Timestamp)
+		key := bucketKey(start)
+		b, ok := buckets[key]
 		if !ok {
-			d = &day{date: date}
-			days[key] = d
-			order = append(order, date)
+			b = &bucket{start: start}
+			buckets[key] = b
+			order = append(order, start)
 		}
-		d.product += r.Product.Code - prevProduct
-		d.test += r.Test.Code - prevTest
-		d.total += r.Delta
-		d.commits++
-		d.subjects = append(d.subjects, r.Subject)
+		b.product += r.Product.Code - prevProduct
+		b.test += r.Test.Code - prevTest
+		b.total += r.Delta
+		b.commits++
+		b.subjects = append(b.subjects, r.Subject)
 
 		prevProduct, prevTest = r.Product.Code, r.Test.Code
 	}
 
 	sort.Slice(order, func(i, j int) bool { return order[i].Before(order[j]) })
-	return days, order
+	return buckets, order
 }
 
-// axisSpan is the number of calendar days the x axis covers, first and last
-// commit day inclusive. Both are UTC midnight, so the division is exact.
-func axisSpan(first, last time.Time) int {
-	return int(last.Sub(first).Hours()/24) + 1
+// axisSpan is the number of buckets the x axis covers, first and last
+// inclusive. Both are UTC, so the division is exact.
+func axisSpan(first, last time.Time, g Granularity) int {
+	return int(last.Sub(first)/g.step()) + 1
 }
 
 // niceMax rounds n up to the next 1, 2 or 5 × 10ⁿ so the axis reads in round
@@ -352,57 +468,67 @@ func niceMax(n int) int {
 	return 10 * pow
 }
 
-func buildChart(label, aria string, days map[string]*day, first time.Time, span, yMax int, pick func(*day) int) chart {
+func buildChart(label, aria string, buckets map[string]*bucket, ax axis, pick func(*bucket) int) chart {
 	c := chart{
 		Label:     label,
 		AriaLabel: aria,
-		YTicks:    buildYTicks(yMax),
+		YTicks:    buildYTicks(ax.yMax),
 	}
 
-	pitch := float64(plotWidth) / float64(span)
 	gap := float64(barGap)
-	if pitch <= minGapPitch {
+	if ax.pitch <= minGapPitch {
 		gap = 0
 	}
-	width := min(pitch-gap, maxBarWidth)
+	width := max(min(ax.pitch-gap, maxBarWidth), minBarWidth)
+	hitWidth := max(ax.pitch, minHitWidth)
 
-	for i := range span {
-		date := first.AddDate(0, 0, i)
-		d := days[dateKey(date)]
-		if d == nil {
+	for i := range ax.span {
+		b := buckets[bucketKey(ax.at(i))]
+		if b == nil {
 			continue
 		}
 
-		slotX := gutterLeft + float64(i)*pitch
+		slotX := gutterLeft + float64(i)*ax.pitch
 		// The hit target is the whole slot, gap included: columns get narrow.
-		c.Hits = append(c.Hits, hit{X: fnum(slotX), W: fnum(pitch), Title: dayTitle(d)})
+		c.Hits = append(c.Hits, hit{
+			X:     fnum(slotSpan(slotX, ax.pitch, hitWidth)),
+			W:     fnum(hitWidth),
+			Title: bucketTitle(b, ax.gran),
+		})
 
-		v := pick(d)
+		v := pick(b)
 		if v == 0 {
 			continue
 		}
-		height := float64(abs(v)) / float64(yMax) * arm
-		b := bar{
+		height := float64(abs(v)) / float64(ax.yMax) * arm
+		r := bar{
 			Class: "bar up",
-			X:     fnum(slotX + (pitch-width)/2),
+			X:     fnum(slotSpan(slotX, ax.pitch, width)),
 			Y:     fnum(zeroY - height),
 			W:     fnum(width),
 			H:     fnum(height),
 		}
 		if v < 0 {
-			b.Class, b.Y = "bar down", fnum(zeroY)
+			r.Class, r.Y = "bar down", fnum(zeroY)
 		}
-		c.Bars = append(c.Bars, b)
+		c.Bars = append(c.Bars, r)
 	}
 
-	c.Months = buildMonthLabels(first, span, pitch)
+	c.XLabels = buildAxisLabels(ax)
 	return c
 }
 
-func dayTitle(d *day) string {
+// slotSpan centres something w wide on the slot at slotX, keeping it inside the
+// plot — w has floors, so it can come out wider than the slot itself. Whenever
+// w fits its slot this is the plain centring it replaces, to the byte.
+func slotSpan(slotX, pitch, w float64) float64 {
+	return max(gutterLeft, min(slotX+(pitch-w)/2, plotRight-w))
+}
+
+func bucketTitle(b *bucket, g Granularity) string {
 	return fmt.Sprintf("%s · product %+d · test %+d · %s\n%s",
-		d.date.Format("Mon 2006-01-02"), d.product, d.test,
-		plural(d.commits, "commit"), strings.Join(d.subjects, "\n"))
+		b.start.Format(g.titleFormat()), b.product, b.test,
+		plural(b.commits, "commit"), strings.Join(b.subjects, "\n"))
 }
 
 // buildYTicks lays out the gridlines: hairlines at ±yMax and ±yMax/2, a
@@ -455,47 +581,111 @@ func commas(n int) string {
 	return out
 }
 
-// buildMonthLabels walks the day axis and labels each month it enters. Every
-// label reserves the span it occupies; a month whose column falls inside the
-// previous label's span, or whose own text would run off the right edge, is
-// skipped rather than drawn on top of its neighbour.
-func buildMonthLabels(first time.Time, span int, pitch float64) []monthLabel {
-	var out []monthLabel
-	claimedTo := -1.0
-	prevMonth := time.Month(0)
+// labelUnit is the unit the x axis is labelled in. It is chosen from the span,
+// not from the granularity alone: an hourly axis over a fortnight wants days.
+type labelUnit int
 
-	for i := range span {
-		date := first.AddDate(0, 0, i)
-		if date.Month() == prevMonth {
+const (
+	unitHour labelUnit = iota
+	unitDay
+	unitMonth
+)
+
+// pickLabelUnit takes the finest unit that does not flood the axis. A unit
+// finer than the bucket says nothing — every day bucket starts at 00:00 — and
+// month is the floor: past a couple of dozen months the claiming below thins
+// them, which is the right reading of a long history.
+func pickLabelUnit(ax axis) labelUnit {
+	if ax.gran == GranularityHour && ax.span <= maxAxisLabels {
+		return unitHour
+	}
+	last := ax.at(ax.span - 1)
+	midnight := GranularityDay.truncate(ax.first)
+	if days := int(last.Sub(midnight)/(24*time.Hour)) + 1; days <= maxAxisLabels {
+		return unitDay
+	}
+	return unitMonth
+}
+
+// id is what makes two slots share a label: consecutive slots carrying the same
+// id belong to one labelled unit, and only the first of them is a candidate.
+func (u labelUnit) id(t time.Time) string {
+	switch u {
+	case unitHour:
+		return t.Format("2006-01-02T15")
+	case unitDay:
+		return t.Format("2006-01-02")
+	}
+	return t.Format("2006-01")
+}
+
+// text writes the label. Day and month labels carry the year on the first label
+// and wherever the year rolls over, so the axis dates itself; an hour label does
+// not need to, because the "Commits" tile already carries the date.
+func (u labelUnit) text(t time.Time, first bool) string {
+	switch u {
+	case unitHour:
+		return t.Format("15:04")
+	case unitDay:
+		if first || (t.Month() == time.January && t.Day() == 1) {
+			return t.Format("2 Jan 2006")
+		}
+		return t.Format("2 Jan")
+	}
+	if first || t.Month() == time.January {
+		return t.Format("Jan 2006")
+	}
+	return t.Format("Jan")
+}
+
+// labelWidth is the room a label claims, in user units at 10px — generous, so a
+// wide "Jan 2006" does not crowd the label behind it.
+func labelWidth(text string) float64 { return float64(len(text))*6 + 10 }
+
+// buildAxisLabels walks the slots and labels each new unit the axis enters.
+// Every label reserves the room its text needs; one whose slot falls inside the
+// previous label's claim, or whose own text would run off the right edge, is
+// dropped rather than drawn on top of its neighbour. A dropped label is not
+// retried at the next slot of the same unit — that would only shift the
+// collision along.
+func buildAxisLabels(ax axis) []xLabel {
+	unit := pickLabelUnit(ax)
+
+	var out []xLabel
+	claimedTo := -1.0
+	prevID := ""
+
+	for i := range ax.span {
+		t := ax.at(i)
+		id := unit.id(t)
+		if id == prevID {
 			continue
 		}
-		prevMonth = date.Month()
+		prevID = id
 
-		text, width := date.Format("Jan"), float64(monthGap)
-		if date.Month() == time.January || len(out) == 0 {
-			text, width = date.Format("Jan 2006"), yearMonthGap
-		}
+		text := unit.text(t, len(out) == 0)
+		width := labelWidth(text)
 
-		x := gutterLeft + float64(i)*pitch
+		x := gutterLeft + float64(i)*ax.pitch
 		if x < claimedTo || x+width > chartWidth {
 			continue
 		}
 		claimedTo = x + width
-		out = append(out, monthLabel{X: fnum(x), Text: text})
+		out = append(out, xLabel{X: fnum(x), Text: text})
 	}
 	return out
 }
 
-func buildDayRows(days map[string]*day, order []time.Time) []dayRow {
-	var out []dayRow
-	for _, date := range order {
-		d := days[dateKey(date)]
-		out = append(out, dayRow{
-			Date:    date.Format("2006-01-02"),
-			Commits: itoa(d.commits),
-			Product: fmt.Sprintf("%+d", d.product),
-			Test:    fmt.Sprintf("%+d", d.test),
-			Total:   fmt.Sprintf("%+d", d.total),
+func buildBucketRows(buckets map[string]*bucket, order []time.Time, g Granularity) []bucketRow {
+	var out []bucketRow
+	for _, start := range order {
+		b := buckets[bucketKey(start)]
+		out = append(out, bucketRow{
+			When:    start.Format(g.rowFormat()),
+			Commits: itoa(b.commits),
+			Product: fmt.Sprintf("%+d", b.product),
+			Test:    fmt.Sprintf("%+d", b.test),
+			Total:   fmt.Sprintf("%+d", b.total),
 		})
 	}
 	return out
@@ -520,9 +710,11 @@ func buildTiles(records []report.Record, order []time.Time) []tile {
 		prevProduct, prevTest = r.Product.Code, r.Test.Code
 	}
 
+	// Compared as formatted text, not as bucket count: an hourly history can
+	// run to several buckets inside one day, which is not a span of days.
 	span := order[0].Format("2 Jan 2006")
-	if len(order) > 1 {
-		span += " – " + order[len(order)-1].Format("2 Jan 2006")
+	if end := order[len(order)-1].Format("2 Jan 2006"); end != span {
+		span += " – " + end
 	}
 
 	return []tile{

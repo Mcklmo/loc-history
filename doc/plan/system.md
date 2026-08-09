@@ -24,7 +24,7 @@ For every commit on a branch, oldest to newest, it:
    the previous commit) to a pluggable sink.
 
 Three sinks ship: a console table, a file (CSV/NDJSON), and a self-contained HTML page that
-charts daily net change for product and test code. Counted commits are cached, so re-running
+charts net change per time bucket for product and test code. Counted commits are cached, so re-running
 after a few new commits is instant.
 
 The tool is **general-purpose** — it defaults to the current directory and runs against any
@@ -58,7 +58,8 @@ These were explicitly chosen from presented alternatives. **Do not re-open them.
 | 4 | Graph output | **Self-contained HTML file** (inlined CSS/SVG, no network) | ANSI blocks in the terminal; a standalone `.svg` |
 | 5 | Go installation | Official tarball to `/usr/local/go` | Homebrew; a version manager |
 | 6 | Test corpus | This repository and synthetic fixtures | A neighbouring `timeseries-visualizer` project, later ruled out of scope |
-| 7 | Graph form | **Two diverging column charts over time** — product and test, one column per day, one shared y scale | A GitHub-contributions calendar heat map (shipped first, superseded); two-sided add/remove bars; a dual axis |
+| 7 | Graph form | **Two diverging column charts over time** — product and test, one column per time bucket, one shared y scale | A GitHub-contributions calendar heat map (shipped first, superseded); two-sided add/remove bars; a dual axis |
+| 8 | Graph time bucket | **`--granularity=hour` (default) or `day`**, with floored column widths and an adaptive x-axis unit | A wider viewBox with horizontal scrolling; month labels for `day` and a special case for `hour` |
 
 On decision 2: the original request said output is "written to a `Reader` interface", but all
 three implementations are writers. The user resolved the contradiction in favour of the
@@ -71,8 +72,19 @@ weekday rows, one tinted cell per day. It answered "how often" well and "how muc
 quartile-bucketed tint cannot show that one day is ten times another, and it merged product
 and test into a single number. The user asked for the GitHub *code-frequency* shape instead.
 The heat map is gone, not deprecated. Where the numbers come from did **not** change — still
-the cloc snapshots, still bucketed by calendar day — so nothing upstream of `internal/writer`
-moved.
+the cloc snapshots — so nothing upstream of `internal/writer` moved.
+
+On decision 8: one column per calendar day broke short histories. This repository's own `main`
+at the time was 14 commits across three hours of one afternoon, which day-wide bucketing draws
+as a single column under a lone `Mar 2026` label. Hourly is therefore the default. Two
+consequences were chosen deliberately. Sub-unit columns are **floored, not scrolled**: growing
+the viewBox and wrapping the SVG in `overflow-x: auto` would reverse decision 7's "the whole
+history fits the card" — instead a column is never drawn under 1 unit and a hit target never
+under 4, so a dense stretch merges into a silhouette, which is the honest reading of it. And
+the x-axis unit **adapts for both granularities** rather than special-casing `hour`, which does
+change the daily rendering: a fortnight now carries day labels instead of one bare `Mar 2026`.
+Granularity is a graph concern only; the console and file sinks emit one row per commit and
+have no notion of buckets.
 
 ---
 
@@ -306,10 +318,18 @@ One self-contained HTML file: inlined CSS and SVG, no `<script>`, `<link>`, `<im
 external URL anywhere, so it opens straight from disk. A test asserts exactly that.
 
 Two **diverging column charts** as small multiples — *Product files* above, *Test files*
-below. The x axis is a linear run of calendar days from the first commit's day to the last,
-inclusive, so quiet days take up room. One column per day, its value the **summed per-category
-snapshot delta of every commit that day**, drawn up from a zero line where the tree grew and
-down where it shrank.
+below. The x axis is a linear run of buckets from the first commit's bucket to the last,
+inclusive, so quiet stretches take up room. One column per bucket, its value the **summed
+per-category snapshot delta of every commit in it**, drawn up from a zero line where the tree
+grew and down where it shrank.
+
+A bucket is an **hour** by default or a **calendar day** under `--granularity=day`.
+`Granularity.truncate` is the single point where a timestamp becomes a bucket: it reads the
+wall clock in the commit's own zone — git hands back `%cI` with its offset intact — and
+relabels that as UTC. So a commit at `23:00+02:00` buckets on its author's own evening, and
+because every bucket time is then UTC, all downstream arithmetic is exact and no DST
+discontinuity can shorten a step. The enum carries the rest of the difference as methods
+(`step`, `noun`, `column`, `titleFormat`, `rowFormat`), so no call site branches on it.
 
 Per record, in the order the sink receives them:
 
@@ -325,27 +345,41 @@ it. **No `git diff --numstat` is involved**: these are net counts differenced fr
 snapshots, so a commit that rewrites 100 lines in place nets to zero and draws no column. The
 figure caption says so.
 
-The **y scale is shared by both charts and symmetric about zero**: `yMax` is the largest daily
+The **y scale is shared by both charts and symmetric about zero**: `yMax` is the largest bucket
 magnitude across *both* series, rounded up to 1/2/5 × 10ⁿ with a floor of 1 so a flat history
-cannot divide by zero. Same lines-per-pixel in both charts, and a −500 day exactly as tall as
-a +500 day. Never a dual axis.
+cannot divide by zero. Same lines-per-pixel in both charts, and a −500 bucket exactly as tall
+as a +500 bucket. Never a dual axis. The shared x geometry — first slot, span, pitch, `yMax`,
+granularity — travels as one `axis` value, which is what keeps the small multiples comparable.
 
-The viewBox is fixed (952 × 210) and the SVG is sized at 100% width, so the whole history
+The viewBox is fixed (952 × 214) and the SVG is sized at 100% width, so the whole history
 always fits the card — no horizontal scrolling, and the two charts stay column-aligned by
 construction. Columns are capped at 24 units and centred in their slot, with a 2-unit surface
 gap while the pitch allows it and no gap below that, so a dense history reads as a continuous
 silhouette. The 4px rounded data-end from the `dataviz` skill is deliberately dropped: columns
 routinely fall under 4 units wide, and a corner radius wider than the bar distorts the value.
 
+Because an hourly year is 8,760 slots across a 898-unit plot — a column a tenth of a unit wide
+— a column is never drawn under **1 unit** and a hit target never under **4**. A floored width
+can outgrow its own slot, so both go through `slotSpan`, which centres them and holds them
+inside the plot; whenever the width fits its slot that is the plain centring it replaces, to
+the byte, so a history that already rendered well is unchanged.
+
+The x axis labels itself in the finest unit that does not flood it — **hour → day → month**,
+chosen from the span rather than the granularity, with month as the floor. Each label claims
+the room its own text needs; one landing inside the previous claim, or running past the right
+edge, is dropped rather than drawn on top of its neighbour, and is not retried at the next slot
+of the same unit. Day and month labels carry the year on the first label and wherever the year
+rolls over; hour labels do not, because the *Commits* tile already carries the date.
+
 Colours are CSS custom properties rather than SVG `fill` attributes, which is what lets one
 document serve both colour schemes: `prefers-color-scheme` plus a `data-theme` override, with
 dark mode a *selected* set of steps rather than an inversion.
 
-One transparent full-height hit target per commit-bearing day carries a `<title>` with the
-date, both categories' deltas, the commit count and the subjects — the same text on both
-charts, so either gives the whole day. Hover and keyboard focus surface it alike. Two
-`<details>` table views, one by day and one by commit, list every charted number, so no value
-is reachable only by hovering.
+One transparent full-height hit target per commit-bearing bucket carries a `<title>` with the
+bucket start, both categories' deltas, the commit count and the subjects — the same text on
+both charts, so either gives the whole bucket. Hover and keyboard focus surface it alike. Two
+`<details>` table views, one by bucket and one by commit, list every charted number, so no
+value is reachable only by hovering.
 
 > The palette is four roles taken unchanged from the `dataviz` skill's reference instance: the
 > documented diverging pair blue ↔ red for added ↔ removed (categorical slots 1 and 8), plus
@@ -483,6 +517,7 @@ loc-history [flags]
   --file-out string      (default "loc-history.csv")
   --file-format string   csv | ndjson (default "csv")
   --graph-out string     (default "loc-history.html")
+  --granularity string   graph time bucket: hour | day (default "hour")
 
   --jobs int             concurrent commits (default 4)
   --work-dir string      scratch root (default "/tmp")

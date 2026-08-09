@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -65,10 +67,18 @@ func escaped(s string) string {
 	return strings.ReplaceAll(template.HTMLEscapeString(s), "+", "&#43;")
 }
 
+// renderGraph uses the default granularity; renderGraphAt pins one.
 func renderGraph(t *testing.T, records []report.Record) string {
 	t.Helper()
+	return renderGraphAt(t, records, 0)
+}
+
+func renderGraphAt(t *testing.T, records []report.Record, gran Granularity) string {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "graph.html")
-	g, err := NewGraph(path, GraphOptions{Title: "loc-history", Subtitle: "fixture · main · src"})
+	g, err := NewGraph(path, GraphOptions{
+		Title: "loc-history", Subtitle: "fixture · main · src", Granularity: gran,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,23 +94,34 @@ func renderGraph(t *testing.T, records []report.Record) string {
 }
 
 func TestGraphMatchesGolden(t *testing.T) {
-	got := renderGraph(t, graphFixture())
-	golden := filepath.Join("testdata", "golden.html")
+	for _, tt := range []struct {
+		name string
+		gran Granularity
+		file string
+	}{
+		{"hour", GranularityHour, "golden.html"},
+		{"day", GranularityDay, "golden-day.html"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := renderGraphAt(t, graphFixture(), tt.gran)
+			golden := filepath.Join("testdata", tt.file)
 
-	if *update {
-		if err := os.WriteFile(golden, []byte(got), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		t.Log("wrote", golden)
-		return
-	}
+			if *update {
+				if err := os.WriteFile(golden, []byte(got), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				t.Log("wrote", golden)
+				return
+			}
 
-	want, err := os.ReadFile(golden)
-	if err != nil {
-		t.Fatalf("read golden: %v (run: go test ./internal/writer -update)", err)
-	}
-	if got != string(want) {
-		t.Errorf("output differs from %s; re-run with -update to accept", golden)
+			want, err := os.ReadFile(golden)
+			if err != nil {
+				t.Fatalf("read golden: %v (run: go test ./internal/writer -update)", err)
+			}
+			if got != string(want) {
+				t.Errorf("output differs from %s; re-run with -update to accept", golden)
+			}
+		})
 	}
 }
 
@@ -130,14 +151,14 @@ func TestGraphIsThemeAware(t *testing.T) {
 	}
 }
 
-func TestGraphBarsCarryTheirDayAndSubjects(t *testing.T) {
+func TestGraphBarsCarryTheirBucketAndSubjects(t *testing.T) {
 	got := renderGraph(t, graphFixture())
 
 	if !strings.Contains(got, "feat: add the panel") {
-		t.Error("commit subjects are missing from the day tooltips")
+		t.Error("commit subjects are missing from the bucket tooltips")
 	}
 	if !strings.Contains(got, "2026-03-04") {
-		t.Error("day tooltips do not name their day")
+		t.Error("bucket tooltips do not name their bucket")
 	}
 }
 
@@ -240,18 +261,33 @@ func TestGraphWithNoRecordsIsStillAValidPage(t *testing.T) {
 	}
 }
 
-func TestGraphSpansEveryDayBetweenFirstAndLastCommit(t *testing.T) {
-	// The fixture runs 3 to 17 March 2026: 15 days on the axis, of which six
-	// carry commits (3, 4, 6, 9, 11, 17).
-	first := time.Date(2026, 3, 3, 0, 0, 0, 0, time.UTC)
-	last := time.Date(2026, 3, 17, 0, 0, 0, 0, time.UTC)
-	if span := axisSpan(first, last); span != 15 {
-		t.Errorf("axis spans %d days, want 15 — quiet days must still take up room", span)
-	}
+func TestGraphSpansEveryBucketBetweenFirstAndLastCommit(t *testing.T) {
+	// The fixture runs 14:30 on 3 March 2026 to 14:30 on the 17th. Every commit
+	// lands at the same time of day, so both granularities see the same six
+	// buckets (3, 4, 6, 9, 11, 17) — only the number of empty slots between
+	// them differs.
+	first := time.Date(2026, 3, 3, 14, 30, 0, 0, time.UTC)
+	last := time.Date(2026, 3, 17, 14, 30, 0, 0, time.UTC)
 
-	got := renderGraph(t, graphFixture())
-	if hits := strings.Count(got, `class="hit"`); hits != 12 {
-		t.Errorf("rendered %d hit targets, want 12 (six commit days × two charts)", hits)
+	for _, tt := range []struct {
+		gran Granularity
+		want int
+	}{
+		{GranularityDay, 15},
+		{GranularityHour, 337},
+	} {
+		t.Run(tt.gran.noun(), func(t *testing.T) {
+			span := axisSpan(tt.gran.truncate(first), tt.gran.truncate(last), tt.gran)
+			if span != tt.want {
+				t.Errorf("axis spans %d %ss, want %d — quiet %ss must still take up room",
+					span, tt.gran.noun(), tt.want, tt.gran.noun())
+			}
+
+			got := renderGraphAt(t, graphFixture(), tt.gran)
+			if hits := strings.Count(got, `class="hit"`); hits != 12 {
+				t.Errorf("rendered %d hit targets, want 12 (six commit buckets × two charts)", hits)
+			}
+		})
 	}
 }
 
@@ -305,7 +341,7 @@ func assertFinite(t *testing.T, page string) {
 
 // The charts and the commit table are two views of the same numbers; this is
 // the invariant that keeps them from disagreeing.
-func TestDailyDeltasSumToTheRecordDelta(t *testing.T) {
+func TestBucketDeltasSumToTheRecordDelta(t *testing.T) {
 	records := graphFixture()
 
 	prevProduct, prevTest := 0, 0
@@ -319,41 +355,313 @@ func TestDailyDeltasSumToTheRecordDelta(t *testing.T) {
 		prevProduct, prevTest = r.Product.Code, r.Test.Code
 	}
 
-	days, order := groupByDay(records)
-	for _, date := range order {
-		d := days[dateKey(date)]
-		if d.product+d.test != d.total {
-			t.Errorf("%s: product %+d + test %+d = %+d, want total %+d",
-				dateKey(date), d.product, d.test, d.product+d.test, d.total)
+	for _, gran := range []Granularity{GranularityHour, GranularityDay} {
+		buckets, order := groupByBucket(records, gran)
+		for _, start := range order {
+			b := buckets[bucketKey(start)]
+			if b.product+b.test != b.total {
+				t.Errorf("%s %s: product %+d + test %+d = %+d, want total %+d",
+					gran.noun(), bucketKey(start), b.product, b.test, b.product+b.test, b.total)
+			}
 		}
 	}
 }
 
 // Nothing charted may be hover-only.
-func TestGraphTableViewCarriesTheChartedDailyValues(t *testing.T) {
-	got := renderGraph(t, graphFixture())
+func TestGraphTableViewCarriesTheChartedBucketValues(t *testing.T) {
+	for _, gran := range []Granularity{GranularityHour, GranularityDay} {
+		t.Run(gran.noun(), func(t *testing.T) {
+			got := renderGraphAt(t, graphFixture(), gran)
 
-	byDay := strings.SplitN(got, "Table view — by day", 2)
-	if len(byDay) != 2 {
-		t.Fatal("no by-day table view")
+			split := strings.SplitN(got, "Table view — by "+gran.noun(), 2)
+			if len(split) != 2 {
+				t.Fatalf("no by-%s table view", gran.noun())
+			}
+			table := strings.SplitN(split[1], "</table>", 2)[0]
+
+			buckets, order := groupByBucket(graphFixture(), gran)
+			for _, start := range order {
+				b := buckets[bucketKey(start)]
+				when := start.Format(gran.rowFormat())
+				if !strings.Contains(table, fmt.Sprintf(`<td>%s</td>`, when)) {
+					t.Errorf("by-%s table omits %s", gran.noun(), when)
+					continue
+				}
+				for _, v := range []int{b.product, b.test, b.total} {
+					want := fmt.Sprintf(`<td class="num">%s</td>`, escaped(fmt.Sprintf("%+d", v)))
+					if !strings.Contains(table, want) {
+						t.Errorf("by-%s table is missing %s for %s", gran.noun(), want, when)
+					}
+				}
+			}
+		})
 	}
-	table := strings.SplitN(byDay[1], "</table>", 2)[0]
+}
 
-	days, order := groupByDay(graphFixture())
-	for _, date := range order {
-		d := days[dateKey(date)]
-		row := fmt.Sprintf(`<td>%s</td>`, dateKey(date))
-		if !strings.Contains(table, row) {
-			t.Errorf("by-day table omits %s", dateKey(date))
-			continue
+// The point of the hour bucket: an afternoon of work is several columns, not
+// one. Nothing else in the fixture suite exercises a within-day split, because
+// every fixture commit lands at 14:30.
+func TestHourlyBucketingSplitsWithinOneDay(t *testing.T) {
+	records := commitsAt(t,
+		time.Date(2026, 3, 3, 9, 15, 0, 0, time.UTC),
+		time.Date(2026, 3, 3, 9, 45, 0, 0, time.UTC),
+		time.Date(2026, 3, 3, 11, 20, 0, 0, time.UTC),
+	)
+
+	if _, order := groupByBucket(records, GranularityHour); len(order) != 2 {
+		t.Errorf("got %d hourly buckets, want 2 (09:00 and 11:00)", len(order))
+	}
+	if _, order := groupByBucket(records, GranularityDay); len(order) != 1 {
+		t.Errorf("got %d daily buckets, want 1", len(order))
+	}
+}
+
+// A commit is bucketed by the wall clock its author saw, and the bucket is
+// relabelled UTC so every step downstream is exactly one hour.
+func TestBucketingKeepsTheCommitsOwnWallClock(t *testing.T) {
+	berlin := time.FixedZone("CEST", 2*60*60)
+	at := time.Date(2026, 8, 9, 23, 30, 0, 0, berlin)
+
+	hour := GranularityHour.truncate(at)
+	if got := hour.Format("2006-01-02 15:04 MST"); got != "2026-08-09 23:00 UTC" {
+		t.Errorf("hour bucket = %s, want the author's own 23:00 relabelled UTC", got)
+	}
+	if day := GranularityDay.truncate(at); day.Format("2006-01-02 15:04 MST") != "2026-08-09 00:00 UTC" {
+		t.Errorf("day bucket = %s, want 2026-08-09 00:00 UTC", day.Format("2006-01-02 15:04 MST"))
+	}
+}
+
+// A year of hourly slots puts a column at a tenth of a unit — invisible, and
+// too thin to hover. The floors trade exact slot width for a chart that can
+// still be read and used.
+func TestGraphFloorsColumnAndTargetWidths(t *testing.T) {
+	// 40 commits spread over ~357 days: 8,581 hourly slots, pitch 0.10.
+	var at []time.Time
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := range 40 {
+		at = append(at, start.Add(time.Duration(i*220)*time.Hour))
+	}
+	got := renderGraphAt(t, commitsAt(t, at...), GranularityHour)
+
+	for _, tt := range []struct {
+		what  string
+		re    *regexp.Regexp
+		floor float64
+	}{
+		{"column", regexp.MustCompile(`<rect class="bar (?:up|down)" x="([\d.]+)" y="[\d.]+" width="([\d.]+)"`), minBarWidth},
+		{"hit target", regexp.MustCompile(`<rect class="hit" x="([\d.]+)" y="\d+" width="([\d.]+)"`), minHitWidth},
+	} {
+		found := tt.re.FindAllStringSubmatch(got, -1)
+		if len(found) == 0 {
+			t.Fatalf("no %s rendered; the assertion below would be vacuous", tt.what)
 		}
-		for _, v := range []int{d.product, d.test, d.total} {
-			want := fmt.Sprintf(`<td class="num">%s</td>`, escaped(fmt.Sprintf("%+d", v)))
-			if !strings.Contains(table, want) {
-				t.Errorf("by-day table is missing %s for %s", want, dateKey(date))
+		for _, m := range found {
+			x, w := mustFloat(t, m[1]), mustFloat(t, m[2])
+			if w < tt.floor {
+				t.Errorf("%s is %.2f units wide, below the %.0f floor", tt.what, w, tt.floor)
+			}
+			// A floored width can outgrow its slot, so it has to be held
+			// inside the plot rather than centred blindly.
+			if x < gutterLeft || x+w > plotRight {
+				t.Errorf("%s spans %.2f–%.2f, outside the plot %d–%d", tt.what, x, x+w, gutterLeft, plotRight)
 			}
 		}
 	}
+	assertFinite(t, got)
+}
+
+func TestAxisLabelUnitFollowsTheSpan(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		first time.Time
+		last  time.Time
+		gran  Granularity
+		want  labelUnit
+	}{
+		{"three hours hourly", hm(17), hm(19), GranularityHour, unitHour},
+		{"fifteen days hourly", hm(0), hm(15 * 24), GranularityHour, unitDay},
+		{"fifteen days daily", hm(0), hm(15 * 24), GranularityDay, unitDay},
+		{"two years hourly", hm(0), hm(2 * 365 * 24), GranularityHour, unitMonth},
+		{"two years daily", hm(0), hm(2 * 365 * 24), GranularityDay, unitMonth},
+		// A day bucket always starts at 00:00, so an hour label would say
+		// nothing however short the history.
+		{"one day daily", hm(0), hm(24), GranularityDay, unitDay},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pickLabelUnit(axisFor(tt.first, tt.last, tt.gran)); got != tt.want {
+				t.Errorf("pickLabelUnit() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// The three-hour history is the case the hour bucket exists for: at day
+// granularity it is one column under a single bare month label.
+func TestAxisLabelsNameTheHoursOfAShortHistory(t *testing.T) {
+	ax := axisFor(hm(17), hm(19), GranularityHour)
+
+	var texts []string
+	for _, l := range buildAxisLabels(ax) {
+		texts = append(texts, l.Text)
+	}
+	want := []string{"17:00", "18:00", "19:00"}
+	if !slices.Equal(texts, want) {
+		t.Errorf("labels = %v, want %v", texts, want)
+	}
+}
+
+// Whatever the unit, labels run left to right and never sit on top of one
+// another — that is what the width claiming buys.
+func TestAxisLabelsAreOrderedAndNeverOverlap(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		first      time.Time
+		last       time.Time
+		gran       Granularity
+		firstLabel string
+	}{
+		{name: "three hours hourly", first: hm(17), last: hm(19), gran: GranularityHour, firstLabel: "17:00"},
+		{name: "fifteen days hourly", first: hm(0), last: hm(15 * 24), gran: GranularityHour, firstLabel: "9 Aug 2026"},
+		{name: "fifteen days daily", first: hm(0), last: hm(15 * 24), gran: GranularityDay, firstLabel: "9 Aug 2026"},
+		{name: "two years daily", first: hm(0), last: hm(2 * 365 * 24), gran: GranularityDay, firstLabel: "Aug 2026"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			labels := buildAxisLabels(axisFor(tt.first, tt.last, tt.gran))
+			if len(labels) == 0 {
+				t.Fatal("axis carries no labels at all")
+			}
+			// The first label dates the axis; the rest may be bare.
+			if labels[0].Text != tt.firstLabel {
+				t.Errorf("first label = %q, want %q", labels[0].Text, tt.firstLabel)
+			}
+
+			claimedTo := -1.0
+			for _, l := range labels {
+				x := mustFloat(t, l.X)
+				if x < claimedTo {
+					t.Errorf("label %q at %.2f runs into the one before it, which claimed to %.2f",
+						l.Text, x, claimedTo)
+				}
+				if end := x + labelWidth(l.Text); end > chartWidth {
+					t.Errorf("label %q ends at %.2f, past the %d-unit viewBox", l.Text, end, chartWidth)
+				} else {
+					claimedTo = end
+				}
+			}
+		})
+	}
+}
+
+// Under hourly bucketing a single afternoon is several buckets, which must not
+// read as a range of dates.
+func TestTileSpanNamesOneDayOnce(t *testing.T) {
+	got := renderGraphAt(t, commitsAt(t,
+		time.Date(2026, 8, 9, 17, 22, 0, 0, time.UTC),
+		time.Date(2026, 8, 9, 18, 4, 0, 0, time.UTC),
+		time.Date(2026, 8, 9, 19, 26, 0, 0, time.UTC),
+	), GranularityHour)
+
+	if !strings.Contains(got, ">9 Aug 2026<") {
+		t.Error("the Commits tile does not name the day the history covers")
+	}
+	if strings.Contains(got, "9 Aug 2026 – 9 Aug 2026") {
+		t.Error("a single day is reported as a range of itself")
+	}
+}
+
+func TestParseGranularity(t *testing.T) {
+	for _, tt := range []struct {
+		in      string
+		want    Granularity
+		wantErr bool
+	}{
+		{in: "hour", want: GranularityHour},
+		{in: "day", want: GranularityDay},
+		{in: "HOUR", want: GranularityHour},
+		{in: " day ", want: GranularityDay},
+		{in: "week", wantErr: true},
+		{in: "", wantErr: true},
+	} {
+		t.Run(tt.in, func(t *testing.T) {
+			got, err := ParseGranularity(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ParseGranularity(%q) = %v, want an error", tt.in, got)
+				}
+				for _, want := range []string{"hour", "day"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q should name the accepted value %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseGranularity(%q) error = %v", tt.in, err)
+			}
+			if got != tt.want {
+				t.Errorf("ParseGranularity(%q) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// A bare GraphOptions has to keep working, and hour is the default at the
+// library layer too, not only behind the flag.
+func TestNewGraphDefaultsToHourlyBuckets(t *testing.T) {
+	g, err := NewGraph(filepath.Join(t.TempDir(), "graph.html"), GraphOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	if g.opts.Granularity != GranularityHour {
+		t.Errorf("granularity = %d, want GranularityHour", g.opts.Granularity)
+	}
+}
+
+// commitsAt builds a growing history landing at the given times, so a test can
+// say when the commits happened and ignore what they contained.
+func commitsAt(t *testing.T, at ...time.Time) []report.Record {
+	t.Helper()
+	var out []report.Record
+	prev := 0
+	for i, ts := range at {
+		rec := report.Record{
+			Short:     fmt.Sprintf("c%06d", i),
+			Timestamp: ts,
+			Subject:   "feat: work",
+			Product:   report.Count{Files: 1, Code: 100 * (i + 1)},
+		}
+		rec.Finalize(prev)
+		prev = rec.TotalCode
+		out = append(out, rec)
+	}
+	return out
+}
+
+// hm is a time h hours after a fixed origin, for spans stated in hours.
+func hm(h int) time.Time {
+	return time.Date(2026, 8, 9, 0, 0, 0, 0, time.UTC).Add(time.Duration(h) * time.Hour)
+}
+
+// axisFor is what build() computes, for a test that only wants the geometry.
+func axisFor(first, last time.Time, gran Granularity) axis {
+	ax := axis{
+		first: gran.truncate(first),
+		gran:  gran,
+		yMax:  1,
+	}
+	ax.span = axisSpan(ax.first, gran.truncate(last), gran)
+	ax.pitch = float64(plotWidth) / float64(ax.span)
+	return ax
+}
+
+func mustFloat(t *testing.T, s string) float64 {
+	t.Helper()
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		t.Fatalf("parse coordinate %q: %v", s, err)
+	}
+	return v
 }
 
 func TestNiceMaxRoundsToRoundNumbers(t *testing.T) {

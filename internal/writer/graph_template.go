@@ -110,8 +110,8 @@ text.tick { text-anchor: end; font-variant-numeric: tabular-nums; }
 .bar.up { fill: var(--added); }
 .bar.down { fill: var(--removed); }
 
-/* One transparent full-slot target per commit-bearing day; hover and keyboard
-   focus surface the same tooltip. */
+/* One transparent full-slot target per commit-bearing bucket; hover and
+   keyboard focus surface the same tooltip. */
 .hit { fill: transparent; }
 .hit:hover { fill: var(--text-primary); fill-opacity: 0.05; }
 .hit:focus {
@@ -153,18 +153,18 @@ td.sha { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var
 </section>
 
 <section class="card">
-  <p class="figure-note">Net lines of code each day — one column per day, up where the tree
-  grew and down where it shrank. Both charts share one scale, so a column in one is directly
-  comparable with a column in the other. These are net counts differenced from a cloc snapshot
-  of each commit, not diff line counts: a commit that rewrites 100 lines in place nets to zero
-  and draws no column.</p>
+  <p class="figure-note">Net lines of code each {{.BucketNoun}} — one column per
+  {{.BucketNoun}}, up where the tree grew and down where it shrank. Both charts share one
+  scale, so a column in one is directly comparable with a column in the other. These are net
+  counts differenced from a cloc snapshot of each commit, not diff line counts: a commit that
+  rewrites 100 lines in place nets to zero and draws no column.</p>
   {{range .Charts}}<figure>
     <figcaption>{{.Label}}</figcaption>
     <svg viewBox="0 0 {{$.Frame.Width}} {{$.Frame.Height}}" role="img" aria-label="{{.AriaLabel}}">
       {{range .YTicks}}<line class="{{.Class}}" x1="{{$.Frame.PlotLeft}}" x2="{{$.Frame.PlotRight}}" y1="{{.Y}}" y2="{{.Y}}"></line>
       <text class="tick" x="{{$.Frame.TickLabelX}}" y="{{.LabelY}}">{{.Text}}</text>
       {{end}}{{range .Bars}}<rect class="{{.Class}}" x="{{.X}}" y="{{.Y}}" width="{{.W}}" height="{{.H}}"></rect>
-      {{end}}{{range .Months}}<text x="{{.X}}" y="{{$.Frame.MonthLabelY}}">{{.Text}}</text>
+      {{end}}{{range .XLabels}}<text x="{{.X}}" y="{{$.Frame.XLabelY}}">{{.Text}}</text>
       {{end}}{{range .Hits}}<rect class="hit" x="{{.X}}" y="{{$.Frame.PlotTop}}" width="{{.W}}" height="{{$.Frame.PlotHeight}}" tabindex="0"><title>{{.Title}}</title></rect>
       {{end}}
     </svg>
@@ -177,15 +177,15 @@ td.sha { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var
 {{end}}
 
 <details>
-  <summary>Table view — by day</summary>
+  <summary>Table view — by {{.BucketNoun}}</summary>
   <table>
     <thead><tr>
-      <th>Date</th>
+      <th>{{.BucketColumn}}</th>
       <th class="num">Commits</th><th class="num">Product Δ</th><th class="num">Test Δ</th><th class="num">Total Δ</th>
     </tr></thead>
     <tbody>
-      {{range .DayRows}}<tr>
-        <td>{{.Date}}</td>
+      {{range .BucketRows}}<tr>
+        <td>{{.When}}</td>
         <td class="num">{{.Commits}}</td><td class="num">{{.Product}}</td>
         <td class="num">{{.Test}}</td><td class="num">{{.Total}}</td>
       </tr>

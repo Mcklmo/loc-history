@@ -161,16 +161,26 @@ projection drops.
 no external URLs, so it opens straight from disk and survives being emailed.
 
 Two column charts, one for product files and one for test files. Time runs along the x axis,
-one column per calendar day; the column is the **summed net change of that day's commits**,
-drawn up from a zero line where the tree grew and down where it shrank, blue for added and red
-for removed. Both charts sit on **one shared y scale**, so a +2000 product day is visibly ten
-times a +200 test day and the two are read against each other rather than side by side.
+one column per `--granularity` bucket — an hour by default, or a calendar day; the column is
+the **summed net change of that bucket's commits**, drawn up from a zero line where the tree
+grew and down where it shrank, blue for added and red for removed. Both charts sit on **one
+shared y scale**, so a +2000 product bucket is visibly ten times a +200 test bucket and the two
+are read against each other rather than side by side.
+
+The default is hourly because a day-wide bucket collapses an afternoon of work into a single
+column, which on a young repo is the whole history. The x axis labels itself in whatever unit
+the span calls for — hours, days, or months — so three hours of work reads as three hours.
 
 Those values are **net counts differenced from the cloc snapshot of each commit, not diff line
 counts**: a commit that rewrites 100 lines in place nets to zero and draws no column. Every
-commit-bearing day carries a tooltip on hover and on keyboard focus, and two `<details>` tables
-— one by day, one by commit — list every charted number, so nothing is reachable only by
-hovering.
+commit-bearing bucket carries a tooltip on hover and on keyboard focus, and two `<details>`
+tables — one by bucket, one by commit — list every charted number, so nothing is reachable only
+by hovering.
+
+The whole history always fits the card; there is no horizontal scrolling. A history dense
+enough to put a column under a unit wide gets a 1-unit floor on the column and a 4-unit floor
+on its hit target, so a sparse history stays visible and hoverable at any span and a genuinely
+dense stretch merges into a silhouette.
 
 ---
 
@@ -189,6 +199,7 @@ loc-history [flags]
   --file-out string      path for the file sink (default "loc-history.csv")
   --file-format string   csv | ndjson (default "csv")
   --graph-out string     path for the graph sink (default "loc-history.html")
+  --granularity string   graph time bucket: hour | day (default "hour")
 
   --jobs int             commits processed concurrently (default 4)
   --work-dir string      scratch root; must be a path Docker may bind-mount (default "/tmp")
