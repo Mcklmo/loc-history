@@ -17,13 +17,33 @@ then a commit.
 - [x] **3. `tree`** — `Extract` via `git archive` into a stdlib tar reader; absent folder is
       `Found=false, nil`; working tree provably untouched; path-traversal and escaping-symlink
       guards. 10 tests. Shared `internal/gittest` fixture helper extracted here.
-- [ ] 4. `cloc` — `Runner`, `parse.go`, `DockerRunner`, `FakeRunner`
+- [x] **4. `cloc`** — `Runner`/`Options`, parser written against captured cloc 1.98 bytes,
+      `DockerRunner`, `VerifyMount` preflight canary, `FakeRunner` (a real local counter).
+      21 tests, container ones skipped under `-short` or a stopped daemon.
 - [ ] 5. `pipeline` — worker pool + reorder buffer
 - [ ] 6. `main.go` — flags and wiring, first real run
 - [ ] 7. `cache`
 - [ ] 8. `FileWriter`
 - [ ] 9. `GraphWriter`
 - [ ] 10. End-to-end verification
+
+## Findings that contradicted the brief
+
+Verified against the real image, not assumed:
+
+- **`--only-match-f` does not exist.** cloc 1.98 offers `--match-f` / `--not-match-f`. The
+  brief's decision #3 (one regex, used both ways) is intact — the flag name was wrong. The
+  complement invariant was then confirmed empirically: 5 + 5 = 10 code, 2 + 2 = 4 files.
+- **cloc version is 1.98**, not the 2.02 the sample JSON assumed. The `SUM` and
+  `header.cloc_version` shape the parser targets is otherwise correct.
+- **An empty result is `{}` with exit 0**, not empty stdout as assumed. Both are handled.
+- **A nonexistent path returns that same `{}` with exit 0.** So does an empty bind mount —
+  which is exactly the macOS trap in §5, and why the mount check cannot be a per-commit
+  heuristic. It is a startup canary with a known answer instead (`VerifyMount`).
+- **The image is amd64-only**; on Apple silicon every container runs under emulation, so the
+  per-container cost the brief budgets for is if anything understated.
+- **Mount point is `/loc`, not `/tmp`.** Mounting over the container's own temp directory
+  leaves cloc nowhere to write.
 
 ## Deviations from the original brief
 
