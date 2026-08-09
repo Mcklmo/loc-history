@@ -11,7 +11,9 @@ then a commit.
 - [x] **1. `report` + `writer`** — `Commit`, `Count`, `Record`, signed `Delta`, `Writer`,
       `MultiWriter` (fans out past a failing sink, joins Close errors), streaming `ConsoleWriter`
       with dash cells for skipped commits. 15 tests.
-- [ ] 2. `gitlog` — commit enumeration
+- [x] **2. `gitlog`** — `Commits(Options)` walking `--reverse` (+ optional `--first-parent`),
+      `%x1f`-delimited format, committer dates, `--limit` keeping the most recent N in
+      chronological order. 10 tests against fixture repos in `t.TempDir()`.
 - [ ] 3. `tree` — `git archive` extraction, absent-folder path
 - [ ] 4. `cloc` — `Runner`, `parse.go`, `DockerRunner`, `FakeRunner`
 - [ ] 5. `pipeline` — worker pool + reorder buffer
