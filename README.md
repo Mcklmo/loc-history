@@ -161,19 +161,21 @@ folder are different facts.
 **`file`** — `--file-format=csv` (default) or `ndjson`, written to `--file-out`.
 CSV columns: `bucket_start,commits,last_sha,last_short,last_author,last_subject,product_code,test_code,total_code,product_delta,test_delta,delta,skipped`.
 `bucket_start` is RFC 3339 at every granularity; the `last_*` columns are the bucket's last
-commit; `product_delta` and `test_delta` are what let a spreadsheet reproduce the two charts.
+commit; `product_code` and `test_code` are what let a spreadsheet reproduce the two charts, and
+`product_delta` and `test_delta` the change behind them.
 NDJSON emits one bucket per line **with its records nested**, so it stays lossless at any
 granularity and keeps the file/comment/blank counts the CSV projection drops.
 
 **`graph`** — one self-contained HTML file at `--graph-out`. Inlined CSS and SVG, no scripts,
 no external URLs, so it opens straight from disk and survives being emailed.
 
-Two column charts, one for product files and one for test files. Time runs along the x axis,
-one column per `--granularity` bucket; the column is the **summed net change of that bucket's
-commits**, drawn up from a zero line where the tree grew and down where it shrank, blue for
-added and red for removed. Both charts sit on **one shared y scale**, so a +2000 product bucket
-is visibly ten times a +200 test bucket and the two are read against each other rather than
-side by side.
+Two area charts, one for product files and one for test files. Time runs along the x axis, one
+slot per `--granularity` bucket; the series is the **running total** — the lines of code
+standing at the end of each bucket. It is drawn as a step, holding flat across quiet stretches
+and stepping where a commit moved it, so a repo that only grows shows a curve that only rises.
+Both charts sit on **one shared y scale** standing on zero, so a 2,000-line product tree is
+visibly ten times a 200-line test tree and the two are read against each other rather than side
+by side.
 
 ### `--granularity`
 
@@ -192,16 +194,16 @@ A bucket has to **divide the day**: `1, 2, 3, 4, 6, 8, 12` or `24` hours, so `ho
 `day` is `24h`. Buckets are anchored at midnight — a `4h` axis runs `00:00, 04:00, …` — which
 is what keeps the slots evenly spaced. `5h` would restart at every midnight and is refused.
 
-Those values are **net counts differenced from the cloc snapshot of each commit, not diff line
-counts**: a commit that rewrites 100 lines in place nets to zero and draws no column. Every
-commit-bearing bucket carries a tooltip on hover and on keyboard focus, and two `<details>`
-tables — one by bucket, one by commit — list every charted number, so nothing is reachable only
-by hovering.
+Those values are **counts taken from the cloc snapshot of each commit, not diff line counts**: a
+commit that rewrites 100 lines in place leaves the total where it was. A bucket whose folder was
+absent counts 0, so the area genuinely drops to the floor there. Every commit-bearing bucket
+carries a tooltip on hover and on keyboard focus, and two `<details>` tables — one by bucket,
+one by commit — list every charted number alongside the per-bucket deltas the chart no longer
+draws, so nothing is reachable only by hovering.
 
-The whole history always fits the card; there is no horizontal scrolling. A history dense
-enough to put a column under a unit wide gets a 1-unit floor on the column and a 4-unit floor
-on its hit target, so a sparse history stays visible and hoverable at any span and a genuinely
-dense stretch merges into a silhouette.
+The whole history always fits the card; there is no horizontal scrolling. A history dense enough
+to put a bucket under a unit wide gets a 4-unit floor on its hit target, so every bucket stays
+hoverable at any span.
 
 ---
 

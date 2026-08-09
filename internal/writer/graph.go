@@ -29,25 +29,16 @@ const (
 	plotWidth  = chartWidth - gutterLeft - gutterRight
 	plotHeight = chartHeight - gutterTop - axisBand
 	plotRight  = chartWidth - gutterRight
-	// arm is half the plot: the axis is symmetric about zero, so a -500 bucket
-	// is exactly as tall as a +500 bucket.
-	arm        = plotHeight / 2
-	zeroY      = gutterTop + arm
+	// baseY is the floor of the plot. A line count is never negative, so the
+	// series sits on the bottom and the whole plot height is signal — twice the
+	// vertical resolution a symmetric axis would have.
+	baseY      = gutterTop + plotHeight
 	tickLabelX = gutterLeft - 8
 	xLabelY    = chartHeight - 5
 
-	// barGap is the surface gap that separates adjacent columns. Below
-	// minGapPitch it is dropped, so a dense history reads as a continuous
-	// silhouette rather than dissolving into the gaps.
-	barGap      = 2
-	minGapPitch = 4
-	maxBarWidth = 24 // a column never fills its slot; the leftover is air
-
-	// An hourly year is 8,760 slots across a 898-unit plot, which puts a column
-	// well under a pixel. These floors keep a sparse history visible and
-	// hoverable at any span; a genuinely dense stretch merges into a silhouette,
-	// which is the honest reading of it.
-	minBarWidth = 1
+	// An hourly year is 8,760 slots across a 898-unit plot, which puts a slot
+	// well under a pixel. The floor keeps every commit-bearing bucket hoverable
+	// at any span.
 	minHitWidth = 4
 
 	// maxAxisLabels is how many x labels the axis will consider before dropping
@@ -56,19 +47,18 @@ const (
 	maxAxisLabels = 20
 )
 
-// GraphOptions labels the page. How wide one column is comes off the buckets
+// GraphOptions labels the page. How wide one bucket is comes off the buckets
 // themselves — see build.
 type GraphOptions struct {
 	Title    string
 	Subtitle string
 }
 
-// Graph renders net change in lines of code per time bucket — one diverging
-// column chart for product files, one for test files — to a self-contained
-// HTML file.
+// Graph renders the running total of lines of code over time — one area chart
+// for product files, one for test files — to a self-contained HTML file.
 //
 // It buffers: the two charts share one y scale computed over the whole history,
-// so no column can be drawn until the last bucket has arrived. A few thousand
+// so nothing can be drawn until the last bucket has arrived. A few thousand
 // buckets is nothing to hold in memory.
 type Graph struct {
 	path    string
@@ -136,7 +126,6 @@ type pageData struct {
 	Frame      frame
 	Tiles      []tile
 	Charts     []chart
-	Key        []legendSwatch
 	BucketRows []bucketRow
 	Rows       []tableRow
 }
@@ -163,29 +152,23 @@ type tile struct {
 type chart struct {
 	Label     string
 	AriaLabel string
-	Bars      []bar
+	Area      area
 	Hits      []hit
 	YTicks    []yTick
 	XLabels   []xLabel
 }
 
-// bar is one bucket's net change, drawn up from the zero line where the tree
-// grew and down where it shrank.
-//
-// The skill's 4px rounded data-end is deliberately dropped: a dense history
-// puts columns well under 4 units wide, and a corner radius wider than the bar
-// distorts the value the bar encodes.
-type bar struct {
-	Class string // "bar up" | "bar down"
-	X     string
-	Y     string
-	W     string
-	H     string
+// area is the running total as two SVG paths sharing one point list: Fill is
+// closed down to the baseline, Line traces the top edge alone so the series
+// stays crisp where the fill is only a tint.
+type area struct {
+	Fill string
+	Line string
 }
 
-// hit is a transparent full-height target over one commit-bearing bucket. It is
-// wider than the column it covers, and both charts carry the same title text,
-// so either one gives the whole bucket's context.
+// hit is a transparent full-height target over one commit-bearing bucket. Both
+// charts carry the same title text, so either one gives the whole bucket's
+// context.
 type hit struct {
 	X     string
 	W     string
@@ -204,17 +187,18 @@ type xLabel struct {
 	Text string
 }
 
-type legendSwatch struct {
-	Class string
-	Label string
-}
-
+// bucketRow carries both readings of a bucket: the level the tree stood at when
+// it closed, and the net change that got it there. The chart draws the level, so
+// the deltas would otherwise be reachable only from a tooltip.
 type bucketRow struct {
-	When    string
-	Commits string
-	Product string
-	Test    string
-	Total   string
+	When         string
+	Commits      string
+	Product      string
+	Test         string
+	Total        string
+	ProductDelta string
+	TestDelta    string
+	Delta        string
 }
 
 type tableRow struct {
@@ -287,11 +271,11 @@ func (g *Graph) build() pageData {
 	p.Tiles = buildTiles(g.buckets, order)
 	p.BucketRows = buildBucketRows(buckets, order, gran)
 
-	// One scale for both charts, so a +2000 product bucket is visibly ten times
-	// a +200 test bucket.
+	// One scale for both charts, so a 2,000-line product tree is visibly ten
+	// times a 200-line test tree.
 	var peak int
 	for _, b := range buckets {
-		peak = max(peak, abs(b.ProductDelta), abs(b.TestDelta))
+		peak = max(peak, b.Product.Code, b.Test.Code)
 	}
 
 	ax := axis{
@@ -305,15 +289,11 @@ func (g *Graph) build() pageData {
 	noun := gran.Noun()
 	p.Charts = []chart{
 		buildChart("Product files",
-			fmt.Sprintf("Column chart of the net change in product lines of code each %s. The same values are listed in the table below.", noun),
-			buckets, ax, func(b *bucket.Bucket) int { return b.ProductDelta }),
+			fmt.Sprintf("Area chart of the running total of product lines of code at the end of each %s. The same values are listed in the table below.", noun),
+			buckets, ax, func(b *bucket.Bucket) int { return b.Product.Code }),
 		buildChart("Test files",
-			fmt.Sprintf("Column chart of the net change in test lines of code each %s, on the same scale as the product chart. The same values are listed in the table below.", noun),
-			buckets, ax, func(b *bucket.Bucket) int { return b.TestDelta }),
-	}
-	p.Key = []legendSwatch{
-		{Class: "added", Label: "added"},
-		{Class: "removed", Label: "removed"},
+			fmt.Sprintf("Area chart of the running total of test lines of code at the end of each %s, on the same scale as the product chart. The same values are listed in the table below.", noun),
+			buckets, ax, func(b *bucket.Bucket) int { return b.Test.Code }),
 	}
 
 	return p
@@ -378,47 +358,68 @@ func buildChart(label, aria string, buckets map[string]*bucket.Bucket, ax axis, 
 		YTicks:    buildYTicks(ax.yMax),
 	}
 
-	gap := float64(barGap)
-	if ax.pitch <= minGapPitch {
-		gap = 0
-	}
-	width := max(min(ax.pitch-gap, maxBarWidth), minBarWidth)
 	hitWidth := max(ax.pitch, minHitWidth)
-
 	for i := range ax.span {
 		b := buckets[bucketKey(ax.at(i))]
 		if b == nil {
 			continue
 		}
-
 		slotX := gutterLeft + float64(i)*ax.pitch
-		// The hit target is the whole slot, gap included: columns get narrow.
 		c.Hits = append(c.Hits, hit{
 			X:     fnum(slotSpan(slotX, ax.pitch, hitWidth)),
 			W:     fnum(hitWidth),
 			Title: bucketTitle(b, ax.gran),
 		})
-
-		v := pick(b)
-		if v == 0 {
-			continue
-		}
-		height := float64(abs(v)) / float64(ax.yMax) * arm
-		r := bar{
-			Class: "bar up",
-			X:     fnum(slotSpan(slotX, ax.pitch, width)),
-			Y:     fnum(zeroY - height),
-			W:     fnum(width),
-			H:     fnum(height),
-		}
-		if v < 0 {
-			r.Class, r.Y = "bar down", fnum(zeroY)
-		}
-		c.Bars = append(c.Bars, r)
 	}
 
+	c.Area = buildArea(buckets, ax, pick)
 	c.XLabels = buildAxisLabels(ax)
 	return c
+}
+
+// yFor maps a line count onto the plot. The series stands on baseY and grows
+// upwards, so a total of yMax reaches the top gridline.
+func yFor(v, yMax int) float64 {
+	return baseY - float64(v)/float64(yMax)*float64(plotHeight)
+}
+
+// buildArea traces the running total as a step: a bucket's total holds until the
+// next commit-bearing bucket, so a quiet stretch reads as flat rather than as
+// absent. Equal-valued runs collapse into a single segment, so the path is sized
+// by the commits rather than by the span — an hourly year is 8,760 slots but
+// only as many steps as there are commit-bearing buckets.
+//
+// A Skipped bucket carries zero counts because the folder was absent, so the
+// area genuinely drops to the floor there. That is what the snapshot says.
+func buildArea(buckets map[string]*bucket.Bucket, ax axis, pick func(*bucket.Bucket) int) area {
+	at := func(x, y float64) string { return fnum(x) + "," + fnum(y) }
+
+	pts := make([]string, 0, 2*len(buckets)+2)
+	running, prevY, first := 0, 0.0, true
+	for i := range ax.span {
+		// A quiet slot holds the level it was left at.
+		v := running
+		if b := buckets[bucketKey(ax.at(i))]; b != nil {
+			v = pick(b)
+		}
+		y := yFor(v, ax.yMax)
+		x := gutterLeft + float64(i)*ax.pitch
+		switch {
+		case first:
+			pts = append(pts, at(x, y))
+			first = false
+		case v != running:
+			pts = append(pts, at(x, prevY), at(x, y)) // hold across, then step
+		}
+		running, prevY = v, y
+	}
+	pts = append(pts, at(plotRight, prevY)) // hold to the right edge
+
+	top := strings.Join(pts, "L")
+	return area{
+		Line: "M" + top,
+		Fill: "M" + at(gutterLeft, baseY) + "L" + top + "L" + at(plotRight, baseY) + "Z",
+	}
 }
 
 // slotSpan centres something w wide on the slot at slotX, keeping it inside the
@@ -428,33 +429,37 @@ func slotSpan(slotX, pitch, w float64) float64 {
 	return max(gutterLeft, min(slotX+(pitch-w)/2, plotRight-w))
 }
 
+// bucketTitle leads with the levels the chart draws and carries the change that
+// got there, so the tooltip reads the same way the chart does.
 func bucketTitle(b *bucket.Bucket, g bucket.Granularity) string {
 	subjects := make([]string, 0, len(b.Records))
 	for _, r := range b.Records {
 		subjects = append(subjects, r.Subject)
 	}
-	return fmt.Sprintf("%s · product %+d · test %+d · %s\n%s",
-		b.Start.Format(g.TitleFormat()), b.ProductDelta, b.TestDelta,
+	return fmt.Sprintf("%s · product %s · test %s · total %s (%s) · %s\n%s",
+		b.Start.Format(g.TitleFormat()), commas(b.Product.Code), commas(b.Test.Code),
+		commas(b.TotalCode), signedCommas(b.Delta),
 		plural(b.Commits, "commit"), strings.Join(subjects, "\n"))
 }
 
-// buildYTicks lays out the gridlines: hairlines at ±yMax and ±yMax/2, a
-// slightly stronger one at zero. An odd axis maximum has no clean half step, so
-// it gets three lines rather than a tick reading "2.5".
+// buildYTicks lays out the gridlines: hairlines at yMax and yMax/2, a slightly
+// stronger one on the zero baseline the series stands on. An odd axis maximum
+// has no clean half step, so it gets two lines rather than a tick reading "2.5".
 func buildYTicks(yMax int) []yTick {
-	fracs := []float64{1, 0.5, 0, -0.5, -1}
+	fracs := []float64{1, 0.5, 0}
 	if yMax%2 != 0 {
-		fracs = []float64{1, 0, -1}
+		fracs = []float64{1, 0}
 	}
 
 	var out []yTick
 	for _, f := range fracs {
-		y := zeroY - f*arm
+		v := int(f * float64(yMax))
+		y := yFor(v, yMax)
 		t := yTick{
 			Y:      fnum(y),
 			LabelY: fnum(y + 3), // 10px text, centred on its line
 			Class:  "grid",
-			Text:   axisLabel(int(f * float64(yMax))),
+			Text:   commas(v),
 		}
 		if f == 0 {
 			t.Class = "zero"
@@ -464,17 +469,17 @@ func buildYTicks(yMax int) []yTick {
 	return out
 }
 
-// axisLabel writes a tick in round, thousands-separated numbers.
-func axisLabel(n int) string {
-	switch {
-	case n > 0:
-		return "+" + commas(n)
-	case n < 0:
-		return "−" + commas(-n)
+// signedCommas writes a change the way the tooltip's levels are written, so one
+// line does not mix separated and unseparated numbers. commas takes it unsigned
+// because its grouping counts digits from the left.
+func signedCommas(n int) string {
+	if n < 0 {
+		return "-" + commas(-n)
 	}
-	return "0"
+	return "+" + commas(n)
 }
 
+// commas groups a non-negative number in thousands.
 func commas(n int) string {
 	s := itoa(n)
 	head := len(s) % 3
@@ -588,11 +593,14 @@ func buildBucketRows(buckets map[string]*bucket.Bucket, order []time.Time, g buc
 	for _, start := range order {
 		b := buckets[bucketKey(start)]
 		out = append(out, bucketRow{
-			When:    start.Format(g.RowFormat()),
-			Commits: itoa(b.Commits),
-			Product: fmt.Sprintf("%+d", b.ProductDelta),
-			Test:    fmt.Sprintf("%+d", b.TestDelta),
-			Total:   fmt.Sprintf("%+d", b.Delta),
+			When:         start.Format(g.RowFormat()),
+			Commits:      itoa(b.Commits),
+			Product:      itoa(b.Product.Code),
+			Test:         itoa(b.Test.Code),
+			Total:        itoa(b.TotalCode),
+			ProductDelta: fmt.Sprintf("%+d", b.ProductDelta),
+			TestDelta:    fmt.Sprintf("%+d", b.TestDelta),
+			Delta:        fmt.Sprintf("%+d", b.Delta),
 		})
 	}
 	return out
@@ -658,13 +666,6 @@ func plural(n int, word string) string {
 		return fmt.Sprintf("%d %s", n, word)
 	}
 	return fmt.Sprintf("%d %ss", n, word)
-}
-
-func abs(n int) int {
-	if n < 0 {
-		return -n
-	}
-	return n
 }
 
 func itoa(n int) string { return fmt.Sprintf("%d", n) }

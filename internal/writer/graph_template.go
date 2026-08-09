@@ -9,12 +9,13 @@ import "html/template"
 // Colours are CSS custom properties rather than SVG fill attributes, which is
 // what lets one document serve both colour schemes.
 //
-// Four data roles, all taken unchanged from the dataviz reference palette: the
-// diverging pair blue ↔ red for added ↔ removed (categorical slots 1 and 8),
-// plus the documented gridline and baseline greys. Direction already encodes
-// the sign, so colour here is redundant with position — the correct double
-// encoding for a diverging scale. Validated as a two-slot palette against both
-// surfaces: every check passes, worst-pair CVD ΔE 21.6 light / 19.2 dark.
+// Three data roles, all taken unchanged from the dataviz reference palette: one
+// series blue (categorical slot 1), plus the documented gridline and baseline
+// greys. The two charts are small multiples of the same measure on one scale, so
+// they share the one accent — varying colour between them would falsely imply
+// the measure differs, and each series is already named by its figcaption.
+// Validated against both surfaces: every check passes, worst-pair CVD ΔE 21.6
+// light / 19.2 dark.
 var pageTemplate = template.Must(template.New("page").Parse(`<!doctype html>
 <html lang="en">
 <head>
@@ -31,8 +32,7 @@ var pageTemplate = template.Must(template.New("page").Parse(`<!doctype html>
   --text-muted:     #898781;
   --border:         rgba(11, 11, 11, 0.10);
 
-  --added:    #2a78d6;
-  --removed:  #e34948;
+  --series:   #2a78d6;
   --grid:     #e1e0d9;
   --baseline: #c3c2b7;
 }
@@ -46,8 +46,7 @@ var pageTemplate = template.Must(template.New("page").Parse(`<!doctype html>
     --text-muted:     #898781;
     --border:         rgba(255, 255, 255, 0.10);
 
-    --added:    #3987e5;
-    --removed:  #e66767;
+    --series:   #3987e5;
     --grid:     #2c2c2a;
     --baseline: #383835;
   }
@@ -61,8 +60,7 @@ var pageTemplate = template.Must(template.New("page").Parse(`<!doctype html>
   --text-muted:     #898781;
   --border:         rgba(255, 255, 255, 0.10);
 
-  --added:    #3987e5;
-  --removed:  #e66767;
+  --series:   #3987e5;
   --grid:     #2c2c2a;
   --baseline: #383835;
 }
@@ -99,7 +97,7 @@ figure + figure { margin-top: 1.5rem; }
 figcaption { margin-bottom: 0.25rem; color: var(--text-secondary); font-weight: 600; }
 
 /* The viewBox is fixed and the whole history fits it, so the chart scales to
-   the card instead of scrolling, and both charts stay column-aligned. */
+   the card instead of scrolling, and both charts stay time-aligned. */
 svg { display: block; width: 100%; height: auto; }
 text { fill: var(--text-muted); font-size: 10px; }
 text.tick { text-anchor: end; font-variant-numeric: tabular-nums; }
@@ -107,8 +105,11 @@ text.tick { text-anchor: end; font-variant-numeric: tabular-nums; }
 .grid { stroke: var(--grid); stroke-width: 1; }
 .zero { stroke: var(--baseline); stroke-width: 1; }
 
-.bar.up { fill: var(--added); }
-.bar.down { fill: var(--removed); }
+/* non-scaling-stroke keeps the line a hairline: the 952-unit viewBox is sized
+   at 100% width, so a plain stroke-width thickens with the card. */
+.area      { fill: var(--series); fill-opacity: 0.22; }
+.area-line { fill: none; stroke: var(--series); stroke-width: 1.5;
+             vector-effect: non-scaling-stroke; }
 
 /* One transparent full-slot target per commit-bearing bucket; hover and
    keyboard focus surface the same tooltip. */
@@ -118,12 +119,6 @@ text.tick { text-anchor: end; font-variant-numeric: tabular-nums; }
   fill: var(--text-primary); fill-opacity: 0.05;
   stroke: var(--text-primary); stroke-width: 1; outline: none;
 }
-
-.legend { display: flex; align-items: center; gap: 1rem; margin-top: 1rem; flex-wrap: wrap; }
-.key { display: inline-flex; align-items: center; gap: 0.375rem; color: var(--text-secondary); font-size: 0.8125rem; }
-.swatch { width: 15px; height: 15px; border-radius: 2px; border: 1px solid var(--border); }
-.swatch.added { background: var(--added); }
-.swatch.removed { background: var(--removed); }
 
 details { margin-top: 1.5rem; }
 summary { cursor: pointer; color: var(--text-secondary); }
@@ -153,26 +148,24 @@ td.sha { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var
 </section>
 
 <section class="card">
-  <p class="figure-note">Net lines of code each {{.BucketNoun}} — one column per
-  {{.BucketNoun}}, up where the tree grew and down where it shrank. Both charts share one
-  scale, so a column in one is directly comparable with a column in the other. These are net
-  counts differenced from a cloc snapshot of each commit, not diff line counts: a commit that
-  rewrites 100 lines in place nets to zero and draws no column.</p>
+  <p class="figure-note">Total lines of code standing at the end of each {{.BucketNoun}} — the
+  area steps where commits landed and holds flat across quiet stretches, so a history that only
+  grows only rises. Both charts share one scale, so the height of one is directly comparable
+  with the height of the other. These are counts taken from a cloc snapshot of each commit, not
+  diff line counts: a commit that rewrites 100 lines in place leaves the total where it was.</p>
   {{range .Charts}}<figure>
     <figcaption>{{.Label}}</figcaption>
     <svg viewBox="0 0 {{$.Frame.Width}} {{$.Frame.Height}}" role="img" aria-label="{{.AriaLabel}}">
       {{range .YTicks}}<line class="{{.Class}}" x1="{{$.Frame.PlotLeft}}" x2="{{$.Frame.PlotRight}}" y1="{{.Y}}" y2="{{.Y}}"></line>
       <text class="tick" x="{{$.Frame.TickLabelX}}" y="{{.LabelY}}">{{.Text}}</text>
-      {{end}}{{range .Bars}}<rect class="{{.Class}}" x="{{.X}}" y="{{.Y}}" width="{{.W}}" height="{{.H}}"></rect>
-      {{end}}{{range .XLabels}}<text x="{{.X}}" y="{{$.Frame.XLabelY}}">{{.Text}}</text>
+      {{end}}<path class="area" d="{{.Area.Fill}}"></path>
+      <path class="area-line" d="{{.Area.Line}}"></path>
+      {{range .XLabels}}<text x="{{.X}}" y="{{$.Frame.XLabelY}}">{{.Text}}</text>
       {{end}}{{range .Hits}}<rect class="hit" x="{{.X}}" y="{{$.Frame.PlotTop}}" width="{{.W}}" height="{{$.Frame.PlotHeight}}" tabindex="0"><title>{{.Title}}</title></rect>
       {{end}}
     </svg>
   </figure>
-  {{end}}<div class="legend">
-    {{range .Key}}<span class="key"><span class="swatch {{.Class}}"></span>{{.Label}}</span>
-    {{end}}
-  </div>
+  {{end}}
 </section>
 {{end}}
 
@@ -181,13 +174,16 @@ td.sha { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var
   <table>
     <thead><tr>
       <th>{{.BucketColumn}}</th>
-      <th class="num">Commits</th><th class="num">Product Δ</th><th class="num">Test Δ</th><th class="num">Total Δ</th>
+      <th class="num">Commits</th><th class="num">Product</th><th class="num">Test</th><th class="num">Total</th>
+      <th class="num">Product Δ</th><th class="num">Test Δ</th><th class="num">Total Δ</th>
     </tr></thead>
     <tbody>
       {{range .BucketRows}}<tr>
         <td>{{.When}}</td>
         <td class="num">{{.Commits}}</td><td class="num">{{.Product}}</td>
         <td class="num">{{.Test}}</td><td class="num">{{.Total}}</td>
+        <td class="num">{{.ProductDelta}}</td><td class="num">{{.TestDelta}}</td>
+        <td class="num">{{.Delta}}</td>
       </tr>
       {{end}}
     </tbody>

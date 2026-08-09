@@ -59,8 +59,8 @@ These were explicitly chosen from presented alternatives. **Do not re-open them.
 | 4 | Graph output | **Self-contained HTML file** (inlined CSS/SVG, no network) | ANSI blocks in the terminal; a standalone `.svg` |
 | 5 | Go installation | Official tarball to `/usr/local/go` | Homebrew; a version manager |
 | 6 | Test corpus | This repository and synthetic fixtures | A neighbouring `timeseries-visualizer` project, later ruled out of scope |
-| 7 | Graph form | **Two diverging column charts over time** — product and test, one column per time bucket, one shared y scale | A GitHub-contributions calendar heat map (shipped first, superseded); two-sided add/remove bars; a dual axis |
-| 8 | Graph time bucket | **`--granularity=hour` (default), `day`, or a width in hours like `4h`**, with floored column widths and an adaptive x-axis unit | A wider viewBox with horizontal scrolling; month labels for `day` and a special case for `hour`; `hour:4` and `"hour 4"` spellings; accepting widths that do not divide 24 |
+| 7 | Graph form | **Two step-area charts of the running total over time** — product and test, one shared y scale standing on zero | A GitHub-contributions calendar heat map (shipped first, superseded); diverging column charts of the per-bucket delta (superseded in turn); two-sided add/remove bars; a dual axis |
+| 8 | Graph time bucket | **`--granularity=hour` (default), `day`, or a width in hours like `4h`**, with a floored hit-target width and an adaptive x-axis unit | A wider viewBox with horizontal scrolling; month labels for `day` and a special case for `hour`; `hour:4` and `"hour 4"` spellings; accepting widths that do not divide 24 |
 
 On decision 2: the original request said output is "written to a `Reader` interface", but all
 three implementations are writers. The user resolved the contradiction in favour of the
@@ -75,13 +75,22 @@ and test into a single number. The user asked for the GitHub *code-frequency* sh
 The heat map is gone, not deprecated. Where the numbers come from did **not** change — still
 the cloc snapshots — so nothing upstream of `internal/writer` moved.
 
+That code-frequency shape was superseded in turn. Charting each bucket's *delta* answered "how
+much changed" but never "how big is this now": a history of uniformly positive deltas drew a row
+of similar columns rather than a curve that climbs. The user asked for the **level** instead —
+"the graph should display the total rows, not the total added rows" — so the two small multiples
+now plot the running total as step areas. The deltas did not become less true, only less
+charted: they still carry the tables, the CSV and the bucket tooltip. Again nothing upstream of
+`internal/writer` moved, because the running total was already on every bucket.
+
 On decision 8: one column per calendar day broke short histories. This repository's own `main`
 at the time was 14 commits across three hours of one afternoon, which day-wide bucketing draws
-as a single column under a lone `Mar 2026` label. Hourly is therefore the default. Two
-consequences were chosen deliberately. Sub-unit columns are **floored, not scrolled**: growing
+as a single step under a lone `Mar 2026` label. Hourly is therefore the default. Two
+consequences were chosen deliberately. Sub-unit slots are **floored, not scrolled**: growing
 the viewBox and wrapping the SVG in `overflow-x: auto` would reverse decision 7's "the whole
-history fits the card" — instead a column is never drawn under 1 unit and a hit target never
-under 4, so a dense stretch merges into a silhouette, which is the honest reading of it. And
+history fits the card" — instead a hit target is never drawn under 4 units, so every bucket
+stays hoverable however dense the stretch. (The column floor this once also needed went with
+the columns; the step area has no minimum width to hold.) And
 the x-axis unit **adapts for both granularities** rather than special-casing `hour`, which does
 change the daily rendering: a fortnight now carries day labels instead of one bare `Mar 2026`.
 
@@ -102,8 +111,8 @@ Arbitrary widths (`4h`) came later. Two things fell out of the constraint that a
 **divide 24**. First, `day` is exactly the 24-hour bucket anchored at midnight, so the enum is
 just an hour count and `hour`/`day` are names for `1h`/`24h` — one vocabulary, not two. Second,
 widths like `5h` are refused rather than supported: truncation floors the hour from midnight,
-so a 5-hour bucket would restart every night and leave columns *between* the axis slots, where
-they would silently not be drawn. `bucket.NewAggregator` enforces the same rule as the flag
+so a 5-hour bucket would restart every night and leave bucket starts *between* the axis slots,
+where they would be looked up, missed, and silently never drawn. `bucket.NewAggregator` enforces the same rule as the flag
 layer, because a library caller can name a bucket the CLI would have rejected. The rejected
 alternative was anchoring the lattice on the epoch, which admits any width but detaches buckets
 from the clock.
@@ -406,8 +415,9 @@ CSV columns:
 The header is fixed rather than derived from the granularity, because it goes out before the
 first bucket exists and so cannot name the unit; `bucket_start` is RFC 3339 at every width
 instead. The `last_*` prefixes are deliberate — the semantics changed, so the names should too,
-rather than silently repurposing `sha`. `product_delta`/`test_delta` let a spreadsheet
-reproduce the two charts. `skipped` is beyond the original specification because without it an
+rather than silently repurposing `sha`. `product_code`/`test_code` let a spreadsheet reproduce
+the two charts, and `product_delta`/`test_delta` the change behind them. `skipped` is beyond
+the original specification because without it an
 absent folder and an empty one both read as zero.
 
 NDJSON emits the whole `Bucket` per line with its `Records` **nested**, which is what keeps the
@@ -419,11 +429,23 @@ projection drops.
 One self-contained HTML file: inlined CSS and SVG, no `<script>`, `<link>`, `<img>` or
 external URL anywhere, so it opens straight from disk. A test asserts exactly that.
 
-Two **diverging column charts** as small multiples — *Product files* above, *Test files*
-below. The x axis is a linear run of buckets from the first commit's bucket to the last,
-inclusive, so quiet stretches take up room. One column per bucket, its value the **summed
-per-category snapshot delta of every commit in it**, drawn up from a zero line where the tree
-grew and down where it shrank.
+Two **step-area charts** as small multiples — *Product files* above, *Test files* below. The x
+axis is a linear run of buckets from the first commit's bucket to the last, inclusive, so quiet
+stretches take up room. Each series is the **running total**: the lines of code standing at the
+end of each bucket, which is that bucket's last commit's snapshot.
+
+It is drawn as a **step** — the level holds flat across a quiet stretch and steps where a commit
+moved it — so a history of positive deltas *rises* rather than reading as a row of similar
+columns, which is what the chart is for. Equal-valued runs collapse into a single segment, so
+the path is sized by the commits rather than by the span: an hourly year is 8,760 slots but only
+as many steps as there are commit-bearing buckets. Each chart is two `<path>`s sharing one point
+list — a tinted fill closed down to the baseline, and the top edge alone, so the series stays
+crisp where the fill is only a tint.
+
+The graph **accumulates nothing**: `Bucket.Product`, `Bucket.Test` and `Bucket.TotalCode` are
+already the end-of-bucket snapshot, so the change was geometry only. A `Skipped` bucket's counts
+are genuinely 0 because the folder was absent at its last commit, so the area drops to the floor
+there rather than being special-cased — that is what the snapshot says.
 
 The graph **derives no bucketing of its own**. It buffers the `bucket.Bucket`s it is handed and
 reads the width off the first of them — `GraphOptions` has no `Granularity` field, so the page
@@ -457,28 +479,30 @@ testΔ    = r.Test.Code    − prevTest
 with `prevProduct`/`prevTest` starting at 0 and running *across* bucket boundaries — including
 across `Skipped` commits, whose counts are 0 — mirroring `Finalize`'s `prevTotal` convention.
 That makes `productΔ + testΔ == Delta` hold for every record and for every bucket, so the
-charts, the two table views and the CSV can never disagree. A test asserts it. **No `git diff --numstat` is involved**: these are net counts differenced from tree
-snapshots, so a commit that rewrites 100 lines in place nets to zero and draws no column. The
-figure caption says so.
+charts, the two table views and the CSV can never disagree. A test asserts it. The deltas are no
+longer *charted*, but they remain the spine of the tables, the CSV and the bucket tooltip.
+**No `git diff --numstat` is involved**: these are counts read off tree snapshots, so a commit
+that rewrites 100 lines in place leaves the total where it was. The figure caption says so.
 
-The **y scale is shared by both charts and symmetric about zero**: `yMax` is the largest bucket
-magnitude across *both* series, rounded up to 1/2/5 × 10ⁿ with a floor of 1 so a flat history
-cannot divide by zero. Same lines-per-pixel in both charts, and a −500 bucket exactly as tall
-as a +500 bucket. Never a dual axis. The shared x geometry — first slot, span, pitch, `yMax`,
-granularity — travels as one `axis` value, which is what keeps the small multiples comparable.
+The **y scale is shared by both charts and stands on zero**: `yMax` is the largest total across
+*both* series, rounded up to 1/2/5 × 10ⁿ with a floor of 1 so a flat history cannot divide by
+zero. A line count is never negative, so the series sits on the floor of the plot and the whole
+plot height is signal — twice the vertical resolution a symmetric axis would have, and the axis
+labels are unsigned. Same lines-per-pixel in both charts, so a 2,000-line product tree is
+visibly ten times a 200-line test tree. Never a dual axis. The shared x geometry — first slot,
+span, pitch, `yMax`, granularity — travels as one `axis` value, which is what keeps the small
+multiples comparable.
 
 The viewBox is fixed (952 × 214) and the SVG is sized at 100% width, so the whole history
-always fits the card — no horizontal scrolling, and the two charts stay column-aligned by
-construction. Columns are capped at 24 units and centred in their slot, with a 2-unit surface
-gap while the pitch allows it and no gap below that, so a dense history reads as a continuous
-silhouette. The 4px rounded data-end from the `dataviz` skill is deliberately dropped: columns
-routinely fall under 4 units wide, and a corner radius wider than the bar distorts the value.
+always fits the card — no horizontal scrolling, and the two charts stay time-aligned by
+construction. Because the SVG scales with the card, the series line is drawn with
+`vector-effect: non-scaling-stroke`, so it stays a hairline on a wide screen rather than
+thickening with the viewBox.
 
-Because an hourly year is 8,760 slots across a 898-unit plot — a column a tenth of a unit wide
-— a column is never drawn under **1 unit** and a hit target never under **4**. A floored width
-can outgrow its own slot, so both go through `slotSpan`, which centres them and holds them
-inside the plot; whenever the width fits its slot that is the plain centring it replaces, to
-the byte, so a history that already rendered well is unchanged.
+Because an hourly year is 8,760 slots across a 898-unit plot — a slot a tenth of a unit wide —
+a hit target is never drawn under **4 units**. A floored width can outgrow its own slot, so it
+goes through `slotSpan`, which centres it and holds it inside the plot; whenever the width fits
+its slot that is the plain centring it replaces, to the byte.
 
 The x axis labels itself in the finest unit that does not flood it — **hour → day → month**,
 chosen from the span rather than the granularity, with month as the floor. Each label claims
@@ -492,17 +516,20 @@ document serve both colour schemes: `prefers-color-scheme` plus a `data-theme` o
 dark mode a *selected* set of steps rather than an inversion.
 
 One transparent full-height hit target per commit-bearing bucket carries a `<title>` with the
-bucket start, both categories' deltas, the commit count and the subjects — the same text on
-both charts, so either gives the whole bucket. Hover and keyboard focus surface it alike. Two
-`<details>` table views, one by bucket and one by commit, list every charted number, so no
-value is reachable only by hovering.
+bucket start, both categories' standing totals, the total and the net change that got there,
+the commit count and the subjects — the same text on both charts, so either gives the whole
+bucket. Hover and keyboard focus surface it alike. Two `<details>` table views, one by bucket
+and one by commit, list every charted number; the by-bucket table carries the levels the chart
+draws *and* the deltas it no longer draws, so neither reading is reachable only by hovering.
 
-> The palette is four roles taken unchanged from the `dataviz` skill's reference instance: the
-> documented diverging pair blue ↔ red for added ↔ removed (categorical slots 1 and 8), plus
-> the documented gridline and baseline greys. Colour is redundant with bar direction, which is
-> the correct double encoding for a diverging scale. Validated as a two-slot palette against
-> both surfaces with the skill's own script — every check passes, worst-pair CVD ΔE 21.6 light
-> / 19.2 dark. The old eight-step ramps are gone, along with the computed red arm they needed.
+> The palette is three roles taken unchanged from the `dataviz` skill's reference instance: one
+> series blue (categorical slot 1), plus the documented gridline and baseline greys. Both charts
+> share the one accent deliberately — they are small multiples of the same measure on one scale,
+> so varying colour between them would falsely imply the measure differs, and each series is
+> already named by its `figcaption`. That is also why there is no legend: a two-swatch key would
+> only repeat the captions. Validated against both surfaces with the skill's own script — every
+> check passes, worst-pair CVD ΔE 21.6 light / 19.2 dark. The old eight-step ramps are gone,
+> along with the red arm and the computed diverging pair they needed.
 
 ---
 

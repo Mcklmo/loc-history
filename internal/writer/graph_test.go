@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -162,14 +163,122 @@ func TestGraphBarsCarryTheirBucketAndSubjects(t *testing.T) {
 	}
 }
 
-// Deletions are real history; the scale has to show them as their own pole.
-func TestGraphUsesADivergingScale(t *testing.T) {
+// The chart is the level the tree stands at, not the change that got it there:
+// the last point has to be the fixture's final 1,310 product lines, not the −90
+// its last commit contributed.
+func TestGraphPlotsTheRunningTotal(t *testing.T) {
 	got := renderGraph(t, graphFixture())
 
-	for _, want := range []string{`class="bar up"`, `class="bar down"`} {
+	for _, want := range []string{`class="area"`, `class="area-line"`} {
 		if !strings.Contains(got, want) {
-			t.Errorf("no column rendered with %q; the fixture contains both growth and deletion", want)
+			t.Errorf("no path rendered with %q", want)
 		}
+	}
+	if strings.Contains(got, `class="bar`) {
+		t.Error("a column was drawn; the chart is an area of the running total")
+	}
+
+	pts := areaLinePoints(t, got, 0)
+	last := pts[len(pts)-1]
+	if want := yFor(1310, 2000); !near(last.y, want) {
+		t.Errorf("product series ends at y=%.2f, want %.2f (1,310 lines standing, not the last delta)", last.y, want)
+	}
+}
+
+type point struct{ x, y float64 }
+
+// near compares coordinates that have been through fnum's two decimals and back.
+func near(a, b float64) bool { return math.Abs(a-b) < 0.01 }
+
+// areaLinePoints parses the top edge of the i-th chart back out of the page, so
+// a test can assert on the shape that was actually rendered.
+func areaLinePoints(t *testing.T, page string, i int) []point {
+	t.Helper()
+	found := regexp.MustCompile(`<path class="area-line" d="M([^"]+)"`).FindAllStringSubmatch(page, -1)
+	if len(found) <= i {
+		t.Fatalf("page carries %d area lines, want more than %d", len(found), i)
+	}
+
+	var out []point
+	for _, pair := range strings.Split(found[i][1], "L") {
+		xy := strings.Split(pair, ",")
+		if len(xy) != 2 {
+			t.Fatalf("malformed path point %q", pair)
+		}
+		out = append(out, point{mustFloat(t, xy[0]), mustFloat(t, xy[1])})
+	}
+	if len(out) == 0 {
+		t.Fatal("area line carries no points")
+	}
+	return out
+}
+
+// The user's requirement in one assertion: if every bucket adds lines, the graph
+// rises. On an SVG canvas y grows downwards, so rising is non-increasing y.
+func TestGraphRisesWithAGrowingHistory(t *testing.T) {
+	var at []time.Time
+	start := time.Date(2026, 3, 3, 9, 0, 0, 0, time.UTC)
+	for i := range 6 {
+		at = append(at, start.Add(time.Duration(i*5)*time.Hour))
+	}
+	got := renderGraphAt(t, commitsAt(t, at...), bucket.GranularityHour)
+
+	pts := areaLinePoints(t, got, 0)
+	if len(pts) < 6 {
+		t.Fatalf("series has %d points for six growing buckets, want a step per bucket", len(pts))
+	}
+	for i, p := range pts[1:] {
+		if p.y > pts[i].y {
+			t.Errorf("point %d drops to y=%.2f from %.2f; a history that only grows must only rise",
+				i+1, p.y, pts[i].y)
+		}
+	}
+	if pts[len(pts)-1].y >= pts[0].y {
+		t.Error("the series ends no higher than it started, so the growth is not visible at all")
+	}
+}
+
+// A quiet stretch is not an absence of code: the total holds until something
+// actually changes it rather than falling away to the baseline.
+func TestGraphHoldsTheTotalAcrossQuietBuckets(t *testing.T) {
+	// The fixture stands at 300 product lines from the 6th of March to the
+	// 11th: the 7th, 8th and 10th carry no commits at all, and the 9th's is
+	// docs-only, so nothing moves the level in between.
+	got := renderGraphAt(t, graphFixture(), bucket.GranularityDay)
+
+	ax := axisFor(
+		time.Date(2026, 3, 3, 14, 30, 0, 0, time.UTC),
+		time.Date(2026, 3, 17, 14, 30, 0, 0, time.UTC),
+		bucket.GranularityDay,
+	)
+	xOf := func(day int) float64 { return gutterLeft + float64(day-3)*ax.pitch }
+	quietFrom, quietTo := xOf(6), xOf(11)
+
+	held := yFor(300, 2000)
+	pts := areaLinePoints(t, got, 0)
+
+	// Nothing happened between the two, so the path has no vertex in there: it
+	// is one flat segment, however many quiet slots it spans.
+	for _, p := range pts {
+		if p.x > quietFrom+0.01 && p.x < quietTo-0.01 {
+			t.Errorf("the series turns at x=%.2f, inside a quiet stretch that has no commits", p.x)
+		}
+	}
+
+	// What it holds is the standing total, not the floor. The step at the far
+	// end is written as a pair — first the value carried across, then the new
+	// one — so the first point there is what the quiet stretch was worth.
+	i := slices.IndexFunc(pts, func(p point) bool { return near(p.x, quietTo) })
+	if i < 0 {
+		t.Fatalf("no point at x=%.2f, where the quiet stretch ends", quietTo)
+	}
+	if !near(pts[i].y, held) {
+		t.Errorf("the series arrives at the next commit at y=%.2f, want %.2f (300 lines still standing)",
+			pts[i].y, held)
+	}
+	if near(pts[i].y, baseY) {
+		t.Errorf("the series fell to the baseline across the quiet stretch; a quiet %s is not an empty tree",
+			bucket.GranularityDay.Noun())
 	}
 }
 
@@ -182,8 +291,8 @@ func TestGraphChartsProductAndTestSeparately(t *testing.T) {
 	for _, want := range []string{
 		"<figcaption>Product files</figcaption>",
 		"<figcaption>Test files</figcaption>",
-		"net change in product lines of code",
-		"net change in test lines of code",
+		"running total of product lines of code",
+		"running total of test lines of code",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output is missing %q", want)
@@ -191,8 +300,8 @@ func TestGraphChartsProductAndTestSeparately(t *testing.T) {
 	}
 }
 
-// Shared scale is the whole point of small multiples: a +2000 product day has
-// to be visibly ten times a +200 test day.
+// Shared scale is the whole point of small multiples: a 2,000-line product tree
+// has to be visibly ten times a 200-line test tree.
 func TestGraphSharesOneYScaleAcrossBothCharts(t *testing.T) {
 	got := renderGraph(t, graphFixture())
 
@@ -200,23 +309,17 @@ func TestGraphSharesOneYScaleAcrossBothCharts(t *testing.T) {
 	if len(figures) != 2 {
 		t.Fatalf("got %d figures, want 2", len(figures))
 	}
-	// The fixture peaks at a +1100 product day, so both axes top out at 2,000.
+	// The fixture peaks at a 1,400-line product tree, so both axes top out at
+	// 2,000 and stand on 0 — a count is never negative.
 	for i, fig := range figures {
-		for _, tick := range []string{"+2,000", "−2,000"} {
+		for _, tick := range []string{"2,000", "0"} {
 			want := ">" + escaped(tick) + "<"
 			if !strings.Contains(fig, want) {
 				t.Errorf("figure %d has no %q tick; the two charts are not on one scale", i, want)
 			}
 		}
-	}
-}
-
-func TestGraphKeyNamesBothDirections(t *testing.T) {
-	got := renderGraph(t, graphFixture())
-
-	for _, want := range []string{`class="swatch added"`, `class="swatch removed"`} {
-		if !strings.Contains(got, want) {
-			t.Errorf("the key has no %q; nothing says which colour is which", want)
+		if strings.Contains(fig, escaped("−2,000")) {
+			t.Errorf("figure %d carries a negative tick; the axis stands on zero", i)
 		}
 	}
 }
@@ -295,9 +398,10 @@ func TestGraphHandlesASingleCommit(t *testing.T) {
 	one := graphFixture()[1:2]
 	got := renderGraph(t, one)
 
-	// 412 product lines, no test lines: one column across the two charts.
-	if bars := strings.Count(got, `class="bar `); bars != 1 {
-		t.Errorf("rendered %d columns for a single commit, want 1", bars)
+	// 412 product lines, no test lines: both charts still draw their series,
+	// the test one flat along the baseline.
+	if areas := strings.Count(got, `class="area"`); areas != 2 {
+		t.Errorf("rendered %d areas for a single commit, want 2", areas)
 	}
 	if !strings.Contains(got, "</html>") {
 		t.Error("a one-commit history did not produce a page")
@@ -323,9 +427,6 @@ func TestGraphHandlesAFlatHistory(t *testing.T) {
 
 	if !strings.Contains(got, "</html>") {
 		t.Fatal("a flat history did not produce a page")
-	}
-	if strings.Contains(got, `class="bar `) {
-		t.Error("a history with no net change drew a column")
 	}
 	assertFinite(t, got)
 }
@@ -357,6 +458,14 @@ func TestGraphTableViewCarriesTheChartedBucketValues(t *testing.T) {
 					t.Errorf("by-%s table omits %s", gran.Noun(), when)
 					continue
 				}
+				// The levels are what the chart draws; the deltas are what it
+				// no longer draws. Neither may be hover-only.
+				for _, v := range []int{b.Product.Code, b.Test.Code, b.TotalCode} {
+					want := fmt.Sprintf(`<td class="num">%d</td>`, v)
+					if !strings.Contains(table, want) {
+						t.Errorf("by-%s table is missing level %s for %s", gran.Noun(), want, when)
+					}
+				}
 				for _, v := range []int{b.ProductDelta, b.TestDelta, b.Delta} {
 					want := fmt.Sprintf(`<td class="num">%s</td>`, escaped(fmt.Sprintf("%+d", v)))
 					if !strings.Contains(table, want) {
@@ -368,10 +477,9 @@ func TestGraphTableViewCarriesTheChartedBucketValues(t *testing.T) {
 	}
 }
 
-// A year of hourly slots puts a column at a tenth of a unit — invisible, and
-// too thin to hover. The floors trade exact slot width for a chart that can
-// still be read and used.
-func TestGraphFloorsColumnAndTargetWidths(t *testing.T) {
+// A year of hourly slots puts a slot at a tenth of a unit — far too thin to
+// hover. The floor trades exact slot width for a chart that can still be used.
+func TestGraphFloorsHitTargetWidth(t *testing.T) {
 	// 40 commits spread over ~357 days: 8,581 hourly slots, pitch 0.10.
 	var at []time.Time
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -380,31 +488,41 @@ func TestGraphFloorsColumnAndTargetWidths(t *testing.T) {
 	}
 	got := renderGraphAt(t, commitsAt(t, at...), bucket.GranularityHour)
 
-	for _, tt := range []struct {
-		what  string
-		re    *regexp.Regexp
-		floor float64
-	}{
-		{"column", regexp.MustCompile(`<rect class="bar (?:up|down)" x="([\d.]+)" y="[\d.]+" width="([\d.]+)"`), minBarWidth},
-		{"hit target", regexp.MustCompile(`<rect class="hit" x="([\d.]+)" y="\d+" width="([\d.]+)"`), minHitWidth},
-	} {
-		found := tt.re.FindAllStringSubmatch(got, -1)
-		if len(found) == 0 {
-			t.Fatalf("no %s rendered; the assertion below would be vacuous", tt.what)
+	found := regexp.MustCompile(`<rect class="hit" x="([\d.]+)" y="\d+" width="([\d.]+)"`).FindAllStringSubmatch(got, -1)
+	if len(found) == 0 {
+		t.Fatal("no hit target rendered; the assertions below would be vacuous")
+	}
+	for _, m := range found {
+		x, w := mustFloat(t, m[1]), mustFloat(t, m[2])
+		if w < minHitWidth {
+			t.Errorf("hit target is %.2f units wide, below the %d floor", w, minHitWidth)
 		}
-		for _, m := range found {
-			x, w := mustFloat(t, m[1]), mustFloat(t, m[2])
-			if w < tt.floor {
-				t.Errorf("%s is %.2f units wide, below the %.0f floor", tt.what, w, tt.floor)
-			}
-			// A floored width can outgrow its slot, so it has to be held
-			// inside the plot rather than centred blindly.
-			if x < gutterLeft || x+w > plotRight {
-				t.Errorf("%s spans %.2f–%.2f, outside the plot %d–%d", tt.what, x, x+w, gutterLeft, plotRight)
-			}
+		// A floored width can outgrow its slot, so it has to be held inside
+		// the plot rather than centred blindly.
+		if x < gutterLeft || x+w > plotRight {
+			t.Errorf("hit target spans %.2f–%.2f, outside the plot %d–%d", x, x+w, gutterLeft, plotRight)
 		}
 	}
 	assertFinite(t, got)
+}
+
+// The path is sized by the commits, not by the span: an hourly year is 8,760
+// slots, and a point per slot would put the whole lattice in the file.
+func TestGraphPathIsSizedByCommitsNotBySpan(t *testing.T) {
+	// 40 commits spread over ~357 days: 8,581 hourly slots.
+	var at []time.Time
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := range 40 {
+		at = append(at, start.Add(time.Duration(i*220)*time.Hour))
+	}
+	got := renderGraphAt(t, commitsAt(t, at...), bucket.GranularityHour)
+
+	// Every commit steps the total, so each contributes a hold and a step,
+	// plus the opening point and the hold out to the right edge.
+	if n, ceiling := len(areaLinePoints(t, got, 0)), 2*40+2; n > ceiling {
+		t.Errorf("the series carries %d points for 40 commits, want at most %d — equal-valued slots are not being coalesced",
+			n, ceiling)
+	}
 }
 
 func TestAxisLabelUnitFollowsTheSpan(t *testing.T) {
@@ -517,7 +635,7 @@ func TestGraphNamesTheGranularityItWasHanded(t *testing.T) {
 
 	got := renderGraphAt(t, records, 4)
 	for _, want := range []string{
-		"Net lines of code each 4 hours",
+		"at the end of each 4 hours",
 		"Table view — by 4 hours",
 		"<th>Bucket start</th>",
 		"<td>2026-03-03 08:00</td>",
