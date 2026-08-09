@@ -39,7 +39,11 @@ then a commit.
       `<details>` table view, theme-aware via `prefers-color-scheme` **and** a `data-theme`
       override. Golden-file test + 12 behavioural tests + 2 CLI tests. Rendered and eyeballed
       in both schemes.
-- [ ] 10. End-to-end verification
+- [x] **10. End-to-end verification** — every check in `system.md` §11 run against real
+      containers. Anchor matches three independent cloc queries; 2.776s cold / 0s warm with
+      byte-identical output; working tree clean; all four failure modes exercised.
+
+**Done.** 131 test functions, `go vet` and `go test ./... -race` clean, zero dependencies.
 
 ## Findings that contradicted the brief
 
