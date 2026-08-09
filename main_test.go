@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mcklmo/loc-history/internal/bucket"
 	"github.com/mcklmo/loc-history/internal/cloc"
 	"github.com/mcklmo/loc-history/internal/gittest"
-	"github.com/mcklmo/loc-history/internal/report"
 	"github.com/mcklmo/loc-history/internal/writer"
 )
 
@@ -38,7 +38,7 @@ func TestParseFlagsDefaults(t *testing.T) {
 		{"limit", cfg.Limit, 0},
 		{"fail-fast", cfg.FailFast, false},
 		{"image", cfg.Image, cloc.DefaultImage},
-		{"granularity", cfg.Granularity, writer.GranularityHour},
+		{"granularity", cfg.Granularity, bucket.GranularityHour},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -139,7 +139,9 @@ func TestExecuteWalksARepositoryEndToEnd(t *testing.T) {
 	if len(lines) != 4 {
 		t.Fatalf("got %d lines, want a header plus 3 commits:\n%s", len(lines), stdout.String())
 	}
-	if !strings.HasPrefix(lines[0], "DATE") {
+	// The fixture clock advances an hour per commit, so at the default
+	// granularity this is still one row per commit.
+	if !strings.HasPrefix(lines[0], "HOUR") {
 		t.Errorf("first line is not the header: %q", lines[0])
 	}
 	for i, want := range []string{"feat: first", "feat: second", "refactor: shrink"} {
@@ -370,6 +372,62 @@ func TestExecuteComposesConsoleAndFileSinks(t *testing.T) {
 	}
 }
 
+// Granularity is not a graph concern any more: commits sharing a bucket merge
+// in every sink, and a wider bucket merges more of them.
+func TestExecuteBucketsEverySinkByGranularity(t *testing.T) {
+	r := gittest.New(t)
+	for i, at := range []string{
+		"2026-08-06T09:10:00Z",
+		"2026-08-06T09:50:00Z",
+		"2026-08-06T14:20:00Z",
+	} {
+		r.Write("src/app.js", strings.Repeat("const a = 1\n", i+1))
+		r.CommitAt("commit", at)
+	}
+
+	for _, tt := range []struct {
+		gran    string
+		buckets int
+	}{
+		{"hour", 2}, // 09:00 holds two commits, 14:00 one
+		{"day", 1},  // all three are one afternoon
+	} {
+		t.Run(tt.gran, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), "history.csv")
+			cfg, err := parseFlags([]string{
+				"--repo=" + r.Dir, "--work-dir=" + t.TempDir(), "--cache-dir=" + t.TempDir(),
+				"--out=console,file", "--file-out=" + out, "--granularity=" + tt.gran,
+			}, new(bytes.Buffer))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var stdout, stderr bytes.Buffer
+			if err := execute(context.Background(), cfg, &cloc.FakeRunner{}, &stdout, &stderr); err != nil {
+				t.Fatalf("execute() error = %v", err)
+			}
+
+			lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+			if len(lines) != tt.buckets+1 {
+				t.Errorf("console printed %d lines, want a header plus %d buckets:\n%s",
+					len(lines), tt.buckets, stdout.String())
+			}
+
+			rows, err := csv.NewReader(bytes.NewReader(mustRead(t, out))).ReadAll()
+			if err != nil {
+				t.Fatalf("file sink output is not valid CSV: %v", err)
+			}
+			if len(rows) != tt.buckets+1 {
+				t.Errorf("got %d CSV rows, want a header plus %d buckets", len(rows), tt.buckets)
+			}
+			// The two sinks are fed by one aggregator, so they cannot disagree.
+			if len(rows) != len(lines) {
+				t.Errorf("console printed %d rows and the CSV %d", len(lines), len(rows))
+			}
+		})
+	}
+}
+
 func TestExecuteWritesNDJSON(t *testing.T) {
 	r := gittest.New(t)
 	r.Write("src/app.js", "const a = 1\n")
@@ -393,12 +451,17 @@ func TestExecuteWritesNDJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var rec report.Record
-	if err := json.Unmarshal(bytes.TrimSpace(b), &rec); err != nil {
+	var got bucket.Bucket
+	if err := json.Unmarshal(bytes.TrimSpace(b), &got); err != nil {
 		t.Fatalf("output is not NDJSON: %v", err)
 	}
-	if rec.Subject != "feat: first" {
-		t.Errorf("subject = %q", rec.Subject)
+	// The records nest inside their bucket, so NDJSON is lossless whatever the
+	// granularity.
+	if len(got.Records) != 1 || got.Records[0].Subject != "feat: first" {
+		t.Errorf("bucket = %+v, want it to nest the one commit", got)
+	}
+	if got.Last().Subject != "feat: first" {
+		t.Errorf("last subject = %q", got.Last().Subject)
 	}
 	if stdout.Len() != 0 {
 		t.Errorf("--out=file should not print a table:\n%s", stdout.String())

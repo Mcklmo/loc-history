@@ -42,8 +42,17 @@ then a commit.
 - [x] **10. End-to-end verification** — every check in `system.md` §11 run against real
       containers. Anchor matches three independent cloc queries; 2.776s cold / 0s warm with
       byte-identical output; working tree clean; all four failure modes exercised.
+- [x] **11. `--granularity` applies to every sink** — bucketing moved out of `writer/graph.go`
+      into a new `internal/bucket` package and now happens **above** the `Writer` interface, so
+      no sink derives it. `Writer.Write` takes a `bucket.Bucket`; console and CSV emit one row
+      per bucket keeping the bucket's last commit plus a commit count; NDJSON nests the records
+      inside the bucket and stays lossless. `pipeline` stopped importing `writer` and declares
+      its own `Sink` over `report.Record`, so its 19 tests compiled untouched — the check that
+      that step was mechanical. The aggregator **streams**, flushing a bucket as soon as a later
+      record arrives, so the console still prints as the walk progresses. All three golden pages
+      still match **byte for byte without `-update`**: same buckets in, same page out.
 
-**Done.** 131 test functions, `go vet` and `go test ./... -race` clean, zero dependencies.
+**Done.** 166 test functions, `go vet` and `go test ./... -race` clean, zero dependencies.
 
 ## Findings that contradicted the brief
 
@@ -89,3 +98,9 @@ Verified against the real image, not assumed:
 - **CSV has a tenth column, `skipped`.** The nine specified columns cannot distinguish "the
   folder was absent" from "the folder was present and empty" — both are zero. NDJSON carries
   it already, since it emits the whole `Record`.
+- **A row is a time bucket, not a commit.** The brief's "one record per commit to a sink"
+  survived until `--granularity` was made to govern every sink. Console and CSV now emit one
+  row per bucket, and the CSV columns were renamed (`last_sha`, `last_short`, `last_author`,
+  `last_subject`) rather than silently repurposed, because the semantics changed. There is
+  deliberately **no** `--granularity=commit`: NDJSON's nested `records` is where individual
+  commits survive, at any width.

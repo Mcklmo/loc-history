@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mcklmo/loc-history/internal/bucket"
 	"github.com/mcklmo/loc-history/internal/cache"
 	"github.com/mcklmo/loc-history/internal/cloc"
 	"github.com/mcklmo/loc-history/internal/gitlog"
@@ -55,7 +56,7 @@ type config struct {
 	FileOut     string
 	FileFormat  writer.Format
 	GraphOut    string
-	Granularity writer.Granularity
+	Granularity bucket.Granularity
 
 	Jobs        int
 	WorkDir     string
@@ -87,7 +88,7 @@ func parseFlags(args []string, errOut io.Writer) (config, error) {
 	fs.StringVar(&fileFormat, "file-format", "csv", "file sink format: csv or ndjson")
 	fs.StringVar(&cfg.GraphOut, "graph-out", "loc-history.html", "path for the graph sink")
 	fs.StringVar(&granularity, "granularity", "hour",
-		"graph time bucket: hour, day, or a width in hours like 4h")
+		"output time bucket: hour, day, or a width in hours like 4h")
 	fs.IntVar(&cfg.Jobs, "jobs", 4, "commits processed concurrently")
 	fs.StringVar(&cfg.WorkDir, "work-dir", "/tmp",
 		"scratch root; must be a path Docker is allowed to bind-mount")
@@ -161,10 +162,10 @@ func ParseFileFormat(s string) (writer.Format, error) {
 	return f, nil
 }
 
-// ParseGranularity validates the graph's time bucket at the flag layer, for the
-// same reason as ParseFileFormat.
-func ParseGranularity(s string) (writer.Granularity, error) {
-	g, err := writer.ParseGranularity(s)
+// ParseGranularity validates the output's time bucket at the flag layer, for
+// the same reason as ParseFileFormat.
+func ParseGranularity(s string) (bucket.Granularity, error) {
+	g, err := bucket.ParseGranularity(s)
 	if err != nil {
 		return 0, fmt.Errorf("-granularity: %w", err)
 	}
@@ -238,9 +239,8 @@ func execute(ctx context.Context, cfg config, runner cloc.Runner, stdout, stderr
 			sinks = append(sinks, f)
 		case "graph":
 			g, err := writer.NewGraph(cfg.GraphOut, writer.GraphOptions{
-				Title:       "loc-history",
-				Subtitle:    graphSubtitle(cfg),
-				Granularity: cfg.Granularity,
+				Title:    "loc-history",
+				Subtitle: graphSubtitle(cfg),
 			})
 			if err != nil {
 				writer.MultiWriter(sinks...).Close()
@@ -250,8 +250,17 @@ func execute(ctx context.Context, cfg config, runner cloc.Runner, stdout, stderr
 		}
 	}
 
+	// The aggregator is the granularity gate: it sits between the pipeline and
+	// every sink, so none of them has to know what a bucket is.
+	sink := writer.MultiWriter(sinks...)
+	agg, err := bucket.NewAggregator(cfg.Granularity, sink)
+	if err != nil {
+		sink.Close()
+		return err
+	}
+
 	start := time.Now()
-	stats, err := pipeline.Run(ctx, commits, runner, writer.MultiWriter(sinks...), pipeline.Options{
+	stats, err := pipeline.Run(ctx, commits, runner, agg, pipeline.Options{
 		Repo:      cfg.Repo,
 		Folder:    cfg.Folder,
 		TestRegex: cfg.TestRegex,

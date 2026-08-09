@@ -14,8 +14,15 @@ import (
 	"github.com/mcklmo/loc-history/internal/cloc"
 	"github.com/mcklmo/loc-history/internal/report"
 	"github.com/mcklmo/loc-history/internal/tree"
-	"github.com/mcklmo/loc-history/internal/writer"
 )
+
+// Sink consumes records in commit order, oldest first, and is closed exactly
+// once when the walk ends. A writer.Writer behind a bucket.Aggregator is the
+// shipped implementation; pipeline does not care which.
+type Sink interface {
+	Write(report.Record) error
+	Close() error
+}
 
 // Options configures a walk.
 type Options struct {
@@ -60,7 +67,7 @@ func Run(
 	ctx context.Context,
 	commits []report.Commit,
 	runner cloc.Runner,
-	w writer.Writer,
+	w Sink,
 	opts Options,
 ) (stats Stats, err error) {
 	defer func() {

@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/mcklmo/loc-history/internal/bucket"
 	"github.com/mcklmo/loc-history/internal/report"
 )
 
@@ -56,111 +56,11 @@ const (
 	maxAxisLabels = 20
 )
 
-// Granularity is the slice of time one column covers, counted in hours.
-//
-// It must divide 24. That is what keeps every bucket on a wall-clock boundary
-// and, more importantly, keeps the x axis an evenly spaced lattice: the
-// geometry below reads slot i as first + i×step, so a bucket landing between
-// two slots would simply never be drawn. A 5-hour bucket restarts at midnight
-// and does exactly that.
-type Granularity int
-
-const (
-	// GranularityHour buckets commits by the hour they landed. It is the
-	// default: a day-wide bucket collapses a whole afternoon of work into a
-	// single column, which on a young repo is the whole history.
-	GranularityHour Granularity = 1
-	// GranularityDay is the 24-hour bucket anchored at midnight, which is
-	// exactly a calendar day — so one hour count expresses both.
-	GranularityDay Granularity = 24
-)
-
-// ParseGranularity converts a --granularity value: the words hour and day, or a
-// bucket width in whole hours, like 4h.
-func ParseGranularity(s string) (Granularity, error) {
-	raw := strings.ToLower(strings.TrimSpace(s))
-	switch raw {
-	case "hour":
-		return GranularityHour, nil
-	case "day":
-		return GranularityDay, nil
-	}
-
-	digits, ok := strings.CutSuffix(raw, "h")
-	if !ok {
-		return 0, fmt.Errorf("unknown granularity %q; want hour, day, or a bucket width like 4h", s)
-	}
-	n, err := strconv.Atoi(digits)
-	if err != nil {
-		return 0, fmt.Errorf("unknown granularity %q; want hour, day, or a bucket width like 4h", s)
-	}
-	if g := Granularity(n); g.valid() {
-		return g, nil
-	}
-	return 0, fmt.Errorf("bucket %q does not divide the day; want 1, 2, 3, 4, 6, 8, 12 or 24 hours", s)
-}
-
-// valid reports whether buckets this wide tile a day exactly.
-func (g Granularity) valid() bool { return g >= 1 && g <= 24 && 24%int(g) == 0 }
-
-// step is how much time one slot on the x axis covers.
-func (g Granularity) step() time.Duration { return time.Duration(g) * time.Hour }
-
-// truncate is the single point at which a timestamp becomes a bucket. It reads
-// the wall clock in the commit's own zone — git hands back %cI with its offset
-// intact — and relabels that as UTC. So a commit at 23:00+02:00 buckets on its
-// author's own evening, and because every bucket time is UTC, the arithmetic
-// downstream is exact: no DST discontinuity can shorten a step.
-//
-// The hour is floored to a multiple of the bucket width, counting from
-// midnight, so a 4-hour axis runs 00:00, 04:00, … and a 24-hour one is the
-// calendar day.
-func (g Granularity) truncate(t time.Time) time.Time {
-	hour := t.Hour() - t.Hour()%int(g)
-	return time.Date(t.Year(), t.Month(), t.Day(), hour, 0, 0, 0, time.UTC)
-}
-
-// noun names a bucket in prose, column heads its table.
-func (g Granularity) noun() string {
-	switch g {
-	case GranularityHour:
-		return "hour"
-	case GranularityDay:
-		return "day"
-	}
-	return fmt.Sprintf("%d hours", int(g))
-}
-
-func (g Granularity) column() string {
-	switch g {
-	case GranularityHour:
-		return "Hour"
-	case GranularityDay:
-		return "Date"
-	}
-	return "Bucket start"
-}
-
-// titleFormat stamps a tooltip, rowFormat a table cell.
-func (g Granularity) titleFormat() string {
-	if g == GranularityDay {
-		return "Mon 2006-01-02"
-	}
-	return "Mon 2006-01-02 15:04"
-}
-
-func (g Granularity) rowFormat() string {
-	if g == GranularityDay {
-		return "2006-01-02"
-	}
-	return "2006-01-02 15:04"
-}
-
-// GraphOptions labels the page and picks how wide one column is.
+// GraphOptions labels the page. How wide one column is comes off the buckets
+// themselves — see build.
 type GraphOptions struct {
-	Title       string
-	Subtitle    string
-	Granularity Granularity
+	Title    string
+	Subtitle string
 }
 
 // Graph renders net change in lines of code per time bucket — one diverging
@@ -168,26 +68,18 @@ type GraphOptions struct {
 // HTML file.
 //
 // It buffers: the two charts share one y scale computed over the whole history,
-// so no column can be drawn until the last record has arrived. A few thousand
-// records is nothing to hold in memory.
+// so no column can be drawn until the last bucket has arrived. A few thousand
+// buckets is nothing to hold in memory.
 type Graph struct {
 	path    string
 	opts    GraphOptions
-	records []report.Record
+	buckets []bucket.Bucket
 }
 
 // NewGraph prepares a graph sink writing to path.
 func NewGraph(path string, opts GraphOptions) (*Graph, error) {
 	if opts.Title == "" {
 		opts.Title = "loc-history"
-	}
-	if opts.Granularity == 0 {
-		opts.Granularity = GranularityHour
-	}
-	// A bucket that does not tile the day would leave columns off the lattice
-	// the axis is drawn on, and they would vanish rather than misdraw.
-	if !opts.Granularity.valid() {
-		return nil, fmt.Errorf("granularity: a %d-hour bucket does not divide the day", opts.Granularity)
 	}
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -205,8 +97,8 @@ func NewGraph(path string, opts GraphOptions) (*Graph, error) {
 	return &Graph{path: path, opts: opts}, nil
 }
 
-func (g *Graph) Write(r report.Record) error {
-	g.records = append(g.records, r)
+func (g *Graph) Write(b bucket.Bucket) error {
+	g.buckets = append(g.buckets, b)
 	return nil
 }
 
@@ -335,16 +227,6 @@ type tableRow struct {
 	Delta   string
 }
 
-// bucket aggregates every commit landing in one slice of time.
-type bucket struct {
-	start    time.Time
-	product  int
-	test     int
-	total    int
-	commits  int
-	subjects []string
-}
-
 // axis is the x geometry the two charts share. Sharing it is what keeps the
 // small multiples comparable: same first slot, same pitch, same y scale.
 type axis struct {
@@ -352,21 +234,28 @@ type axis struct {
 	span  int
 	pitch float64
 	yMax  int
-	gran  Granularity
+	gran  bucket.Granularity
 }
 
 // at is the start of the i-th slot. Every bucket time is UTC, so this is exact.
 func (a axis) at(i int) time.Time {
-	return a.first.Add(time.Duration(i) * a.gran.step())
+	return a.first.Add(time.Duration(i) * a.gran.Step())
 }
 
 func (g *Graph) build() pageData {
-	gran := g.opts.Granularity
+	// The buckets are self-describing, so the page cannot disagree with what
+	// was actually aggregated. An empty history has nothing to read it off, and
+	// hour is the default everywhere else too.
+	gran := bucket.GranularityHour
+	if len(g.buckets) > 0 {
+		gran = g.buckets[0].Gran
+	}
+
 	p := pageData{
 		Title:        g.opts.Title,
 		Subtitle:     g.opts.Subtitle,
-		BucketNoun:   gran.noun(),
-		BucketColumn: gran.column(),
+		BucketNoun:   gran.Noun(),
+		BucketColumn: gran.Column(),
 		Frame: frame{
 			Width: chartWidth, Height: chartHeight,
 			PlotLeft: gutterLeft, PlotRight: plotRight,
@@ -375,32 +264,34 @@ func (g *Graph) build() pageData {
 		},
 	}
 
-	for _, r := range g.records {
-		p.Rows = append(p.Rows, tableRow{
-			Date:    r.Timestamp.Format("2006-01-02"),
-			Short:   r.Short,
-			Subject: r.Subject,
-			Product: countCell(r, r.Product.Code),
-			Test:    countCell(r, r.Test.Code),
-			Total:   countCell(r, r.TotalCode),
-			Delta:   fmt.Sprintf("%+d", r.Delta),
-		})
+	for _, b := range g.buckets {
+		for _, r := range b.Records {
+			p.Rows = append(p.Rows, tableRow{
+				Date:    r.Timestamp.Format("2006-01-02"),
+				Short:   r.Short,
+				Subject: r.Subject,
+				Product: countCell(r, r.Product.Code),
+				Test:    countCell(r, r.Test.Code),
+				Total:   countCell(r, r.TotalCode),
+				Delta:   fmt.Sprintf("%+d", r.Delta),
+			})
+		}
 	}
 
-	if len(g.records) == 0 {
+	if len(g.buckets) == 0 {
 		p.Empty = true
 		return p
 	}
 
-	buckets, order := groupByBucket(g.records, gran)
-	p.Tiles = buildTiles(g.records, order)
+	buckets, order := indexBuckets(g.buckets)
+	p.Tiles = buildTiles(g.buckets, order)
 	p.BucketRows = buildBucketRows(buckets, order, gran)
 
 	// One scale for both charts, so a +2000 product bucket is visibly ten times
 	// a +200 test bucket.
 	var peak int
 	for _, b := range buckets {
-		peak = max(peak, abs(b.product), abs(b.test))
+		peak = max(peak, abs(b.ProductDelta), abs(b.TestDelta))
 	}
 
 	ax := axis{
@@ -411,14 +302,14 @@ func (g *Graph) build() pageData {
 	}
 	ax.pitch = float64(plotWidth) / float64(ax.span)
 
-	noun := gran.noun()
+	noun := gran.Noun()
 	p.Charts = []chart{
 		buildChart("Product files",
 			fmt.Sprintf("Column chart of the net change in product lines of code each %s. The same values are listed in the table below.", noun),
-			buckets, ax, func(b *bucket) int { return b.product }),
+			buckets, ax, func(b *bucket.Bucket) int { return b.ProductDelta }),
 		buildChart("Test files",
 			fmt.Sprintf("Column chart of the net change in test lines of code each %s, on the same scale as the product chart. The same values are listed in the table below.", noun),
-			buckets, ax, func(b *bucket) int { return b.test }),
+			buckets, ax, func(b *bucket.Bucket) int { return b.TestDelta }),
 	}
 	p.Key = []legendSwatch{
 		{Class: "added", Label: "added"},
@@ -441,44 +332,25 @@ func countCell(r report.Record, n int) string {
 // bucket, so one format serves every granularity.
 func bucketKey(t time.Time) string { return t.Format(time.RFC3339) }
 
-// groupByBucket sums the per-category deltas of every commit sharing a bucket,
-// and returns the bucket starts in chronological order.
-//
-// The deltas come from the cloc snapshots the pipeline already produced, not
-// from a diff. prevProduct/prevTest start at zero — including across Skipped
-// commits, whose counts are zero — mirroring Finalize's prevTotal convention,
-// which is what makes productΔ + testΔ == Delta hold for every record.
-func groupByBucket(records []report.Record, g Granularity) (map[string]*bucket, []time.Time) {
-	buckets := make(map[string]*bucket, len(records))
-	var order []time.Time
-	prevProduct, prevTest := 0, 0
-
-	for _, r := range records {
-		start := g.truncate(r.Timestamp)
-		key := bucketKey(start)
-		b, ok := buckets[key]
-		if !ok {
-			b = &bucket{start: start}
-			buckets[key] = b
-			order = append(order, start)
-		}
-		b.product += r.Product.Code - prevProduct
-		b.test += r.Test.Code - prevTest
-		b.total += r.Delta
-		b.commits++
-		b.subjects = append(b.subjects, r.Subject)
-
-		prevProduct, prevTest = r.Product.Code, r.Test.Code
+// indexBuckets puts the buffered buckets where the lattice can find them: the
+// axis walks every slot between the first and the last, including the quiet
+// ones, and looks each up by its start. The aggregator already emitted them
+// chronologically, so the order is simply the order they arrived in.
+func indexBuckets(buckets []bucket.Bucket) (map[string]*bucket.Bucket, []time.Time) {
+	byStart := make(map[string]*bucket.Bucket, len(buckets))
+	order := make([]time.Time, 0, len(buckets))
+	for i := range buckets {
+		b := &buckets[i]
+		byStart[bucketKey(b.Start)] = b
+		order = append(order, b.Start)
 	}
-
-	sort.Slice(order, func(i, j int) bool { return order[i].Before(order[j]) })
-	return buckets, order
+	return byStart, order
 }
 
 // axisSpan is the number of buckets the x axis covers, first and last
 // inclusive. Both are UTC, so the division is exact.
-func axisSpan(first, last time.Time, g Granularity) int {
-	return int(last.Sub(first)/g.step()) + 1
+func axisSpan(first, last time.Time, g bucket.Granularity) int {
+	return int(last.Sub(first)/g.Step()) + 1
 }
 
 // niceMax rounds n up to the next 1, 2 or 5 × 10ⁿ so the axis reads in round
@@ -499,7 +371,7 @@ func niceMax(n int) int {
 	return 10 * pow
 }
 
-func buildChart(label, aria string, buckets map[string]*bucket, ax axis, pick func(*bucket) int) chart {
+func buildChart(label, aria string, buckets map[string]*bucket.Bucket, ax axis, pick func(*bucket.Bucket) int) chart {
 	c := chart{
 		Label:     label,
 		AriaLabel: aria,
@@ -556,10 +428,14 @@ func slotSpan(slotX, pitch, w float64) float64 {
 	return max(gutterLeft, min(slotX+(pitch-w)/2, plotRight-w))
 }
 
-func bucketTitle(b *bucket, g Granularity) string {
+func bucketTitle(b *bucket.Bucket, g bucket.Granularity) string {
+	subjects := make([]string, 0, len(b.Records))
+	for _, r := range b.Records {
+		subjects = append(subjects, r.Subject)
+	}
 	return fmt.Sprintf("%s · product %+d · test %+d · %s\n%s",
-		b.start.Format(g.titleFormat()), b.product, b.test,
-		plural(b.commits, "commit"), strings.Join(b.subjects, "\n"))
+		b.Start.Format(g.TitleFormat()), b.ProductDelta, b.TestDelta,
+		plural(b.Commits, "commit"), strings.Join(subjects, "\n"))
 }
 
 // buildYTicks lays out the gridlines: hairlines at ±yMax and ±yMax/2, a
@@ -627,11 +503,11 @@ const (
 // month is the floor: past a couple of dozen months the claiming below thins
 // them, which is the right reading of a long history.
 func pickLabelUnit(ax axis) labelUnit {
-	if ax.gran < GranularityDay && ax.span <= maxAxisLabels {
+	if ax.gran < bucket.GranularityDay && ax.span <= maxAxisLabels {
 		return unitHour
 	}
 	last := ax.at(ax.span - 1)
-	midnight := GranularityDay.truncate(ax.first)
+	midnight := bucket.GranularityDay.Truncate(ax.first)
 	if days := int(last.Sub(midnight)/(24*time.Hour)) + 1; days <= maxAxisLabels {
 		return unitDay
 	}
@@ -707,38 +583,43 @@ func buildAxisLabels(ax axis) []xLabel {
 	return out
 }
 
-func buildBucketRows(buckets map[string]*bucket, order []time.Time, g Granularity) []bucketRow {
+func buildBucketRows(buckets map[string]*bucket.Bucket, order []time.Time, g bucket.Granularity) []bucketRow {
 	var out []bucketRow
 	for _, start := range order {
 		b := buckets[bucketKey(start)]
 		out = append(out, bucketRow{
-			When:    start.Format(g.rowFormat()),
-			Commits: itoa(b.commits),
-			Product: fmt.Sprintf("%+d", b.product),
-			Test:    fmt.Sprintf("%+d", b.test),
-			Total:   fmt.Sprintf("%+d", b.total),
+			When:    start.Format(g.RowFormat()),
+			Commits: itoa(b.Commits),
+			Product: fmt.Sprintf("%+d", b.ProductDelta),
+			Test:    fmt.Sprintf("%+d", b.TestDelta),
+			Total:   fmt.Sprintf("%+d", b.Delta),
 		})
 	}
 	return out
 }
 
-func buildTiles(records []report.Record, order []time.Time) []tile {
-	last := records[len(records)-1]
+func buildTiles(buckets []bucket.Bucket, order []time.Time) []tile {
+	// The tree as it stood at the end of the history is the last bucket's
+	// snapshot, which is its last commit's.
+	last := buckets[len(buckets)-1]
 
-	var productAdded, productRemoved, testAdded, testRemoved int
+	var productAdded, productRemoved, testAdded, testRemoved, commits int
 	prevProduct, prevTest := 0, 0
-	for _, r := range records {
-		if d := r.Product.Code - prevProduct; d > 0 {
-			productAdded += d
-		} else {
-			productRemoved -= d
+	for _, b := range buckets {
+		commits += b.Commits
+		for _, r := range b.Records {
+			if d := r.Product.Code - prevProduct; d > 0 {
+				productAdded += d
+			} else {
+				productRemoved -= d
+			}
+			if d := r.Test.Code - prevTest; d > 0 {
+				testAdded += d
+			} else {
+				testRemoved -= d
+			}
+			prevProduct, prevTest = r.Product.Code, r.Test.Code
 		}
-		if d := r.Test.Code - prevTest; d > 0 {
-			testAdded += d
-		} else {
-			testRemoved -= d
-		}
-		prevProduct, prevTest = r.Product.Code, r.Test.Code
 	}
 
 	// Compared as formatted text, not as bucket count: an hourly history can
@@ -766,7 +647,7 @@ func buildTiles(records []report.Record, order []time.Time) []tile {
 		},
 		{
 			Label: "Commits",
-			Value: fmt.Sprintf("%d", len(records)),
+			Value: fmt.Sprintf("%d", commits),
 			Note:  span,
 		},
 	}

@@ -9,13 +9,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mcklmo/loc-history/internal/bucket"
 	"github.com/mcklmo/loc-history/internal/report"
 )
 
+// writeAll streams records through the granularity gate into w, at the default
+// hourly width unless a test says otherwise.
 func writeAll(t *testing.T, w Writer, records ...report.Record) {
 	t.Helper()
-	for _, r := range records {
-		if err := w.Write(r); err != nil {
+	writeAllAt(t, w, bucket.GranularityHour, records...)
+}
+
+func writeAllAt(t *testing.T, w Writer, gran bucket.Granularity, records ...report.Record) {
+	t.Helper()
+	for _, b := range bucketsOf(t, gran, records...) {
+		if err := w.Write(b); err != nil {
 			t.Fatalf("Write() error = %v", err)
 		}
 	}
@@ -69,7 +77,7 @@ func TestParseFormatErrorNamesTheAlternatives(t *testing.T) {
 	}
 }
 
-func TestCSVWritesAHeaderThenOneRowPerCommit(t *testing.T) {
+func TestCSVWritesAHeaderThenOneRowPerBucket(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "out.csv")
 	w, err := NewFile(path, FormatCSV)
 	if err != nil {
@@ -85,24 +93,61 @@ func TestCSVWritesAHeaderThenOneRowPerCommit(t *testing.T) {
 		t.Fatalf("output is not valid CSV: %v", err)
 	}
 	if len(rows) != 3 {
-		t.Fatalf("got %d rows, want a header plus 2 commits", len(rows))
+		t.Fatalf("got %d rows, want a header plus 2 buckets", len(rows))
 	}
 
-	wantHeader := []string{"sha", "short", "timestamp", "author", "subject",
-		"product_code", "test_code", "total_code", "delta", "skipped"}
+	wantHeader := []string{
+		"bucket_start", "commits",
+		"last_sha", "last_short", "last_author", "last_subject",
+		"product_code", "test_code", "total_code",
+		"product_delta", "test_delta", "delta", "skipped",
+	}
 	if strings.Join(rows[0], ",") != strings.Join(wantHeader, ",") {
 		t.Errorf("header = %v, want %v", rows[0], wantHeader)
 	}
 
 	want := []string{
-		"08ab753" + strings.Repeat("0", 33), "08ab753", "2026-08-06T12:00:00Z",
-		"mcklmo", "first commit", "412", "0", "412", "412", "false",
+		"2026-08-06T12:00:00Z", "1",
+		"08ab753" + strings.Repeat("0", 33), "08ab753", "mcklmo", "first commit",
+		"412", "0", "412", "412", "0", "412", "false",
 	}
 	if strings.Join(rows[1], ",") != strings.Join(want, ",") {
 		t.Errorf("row = %v\nwant %v", rows[1], want)
 	}
-	if rows[2][8] != "176" {
-		t.Errorf("delta = %q, want 176", rows[2][8])
+	// The two category deltas are what let a reader reproduce the charts.
+	if rows[2][9] != "76" || rows[2][10] != "100" || rows[2][11] != "176" {
+		t.Errorf("second row deltas = product %q, test %q, total %q; want 76, 100, 176",
+			rows[2][9], rows[2][10], rows[2][11])
+	}
+}
+
+// Commits sharing a slice of time are one row, and the row says how many.
+func TestCSVCollapsesABucketToOneRow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.csv")
+	w, err := NewFile(path, FormatCSV)
+	if err != nil {
+		t.Fatal(err)
+	}
+	day := time.Date(2026, 8, 6, 0, 0, 0, 0, time.UTC)
+	writeAll(t, w,
+		recAt(day.Add(9*time.Hour), "08ab753", "feat: first", 100, 0, 0),
+		recAt(day.Add(9*time.Hour+30*time.Minute), "d251527", "test: cover it", 100, 80, 100),
+	)
+
+	rows, err := csv.NewReader(strings.NewReader(readFile(t, path))).ReadAll()
+	if err != nil {
+		t.Fatalf("output is not valid CSV: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want a header plus 1 bucket", len(rows))
+	}
+	want := []string{
+		"2026-08-06T09:00:00Z", "2",
+		"d251527" + strings.Repeat("0", 33), "d251527", "mcklmo", "test: cover it",
+		"100", "80", "180", "100", "80", "180", "false",
+	}
+	if strings.Join(rows[1], ",") != strings.Join(want, ",") {
+		t.Errorf("row = %v\nwant %v", rows[1], want)
 	}
 }
 
@@ -120,8 +165,8 @@ func TestCSVQuotesHostileSubjects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("output is not valid CSV: %v", err)
 	}
-	if rows[1][4] != hostile {
-		t.Errorf("subject = %q, want %q", rows[1][4], hostile)
+	if rows[1][5] != hostile {
+		t.Errorf("last_subject = %q, want %q", rows[1][5], hostile)
 	}
 }
 
@@ -134,14 +179,14 @@ func TestCSVRendersNegativeDeltas(t *testing.T) {
 	writeAll(t, w, rec(6, "abc1234", "refactor", 100, 0, 500))
 
 	rows, _ := csv.NewReader(strings.NewReader(readFile(t, path))).ReadAll()
-	if rows[1][8] != "-400" {
-		t.Errorf("delta = %q, want -400", rows[1][8])
+	if rows[1][11] != "-400" {
+		t.Errorf("delta = %q, want -400", rows[1][11])
 	}
 }
 
 // Without this column a CSV reader cannot tell an absent folder from an
 // empty one, and both look like zero.
-func TestCSVMarksSkippedCommits(t *testing.T) {
+func TestCSVMarksSkippedBuckets(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "out.csv")
 	w, err := NewFile(path, FormatCSV)
 	if err != nil {
@@ -152,8 +197,8 @@ func TestCSVMarksSkippedCommits(t *testing.T) {
 	writeAll(t, w, r)
 
 	rows, _ := csv.NewReader(strings.NewReader(readFile(t, path))).ReadAll()
-	if rows[1][9] != "true" {
-		t.Errorf("skipped = %q, want true", rows[1][9])
+	if rows[1][12] != "true" {
+		t.Errorf("skipped = %q, want true", rows[1][12])
 	}
 }
 
@@ -165,7 +210,7 @@ func TestCSVWithNoRecordsStillHasItsHeader(t *testing.T) {
 	}
 	writeAll(t, w)
 
-	if got := readFile(t, path); !strings.HasPrefix(got, "sha,short,") {
+	if got := readFile(t, path); !strings.HasPrefix(got, "bucket_start,commits,") {
 		t.Errorf("empty run produced %q, want a header row", got)
 	}
 }
@@ -186,15 +231,53 @@ func TestNDJSONEmitsOneObjectPerLine(t *testing.T) {
 		t.Fatalf("got %d lines, want 2", len(lines))
 	}
 
-	var got report.Record
+	var got bucket.Bucket
 	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
 		t.Fatalf("line 0 is not valid JSON: %v", err)
 	}
-	if got.Short != "08ab753" || got.TotalCode != 412 || got.Delta != 412 {
-		t.Errorf("decoded %+v, want the first record", got)
+	if got.Last().Short != "08ab753" || got.TotalCode != 412 || got.Delta != 412 {
+		t.Errorf("decoded %+v, want the first bucket", got)
 	}
-	if !got.Timestamp.Equal(time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)) {
-		t.Errorf("timestamp = %s", got.Timestamp)
+	if !got.Start.Equal(time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)) {
+		t.Errorf("bucket start = %s", got.Start)
+	}
+	if got.Gran != bucket.GranularityHour {
+		t.Errorf("bucket_hours = %d, want the width it was cut at", got.Gran)
+	}
+}
+
+// NDJSON stays lossless at any granularity: the records nest inside their
+// bucket, so nothing a wider bucket merges is actually thrown away.
+func TestNDJSONNestsEveryRecordOfTheBucket(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.ndjson")
+	w, err := NewFile(path, FormatNDJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAllAt(t, w, bucket.GranularityDay,
+		rec(6, "08ab753", "first commit", 412, 0, 0),
+		rec(6, "d251527", "git add init", 488, 100, 412),
+	)
+
+	lines := strings.Split(strings.TrimSuffix(readFile(t, path), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("got %d lines, want the day to be one object", len(lines))
+	}
+
+	var got bucket.Bucket
+	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Records) != 2 {
+		t.Fatalf("bucket nests %d records, want both commits", len(got.Records))
+	}
+	for i, want := range []string{"08ab753", "d251527"} {
+		if got.Records[i].Short != want {
+			t.Errorf("record %d = %s, want %s", i, got.Records[i].Short, want)
+		}
+	}
+	if got.ProductDelta+got.TestDelta != got.Delta {
+		t.Errorf("product %+d + test %+d != delta %+d", got.ProductDelta, got.TestDelta, got.Delta)
 	}
 }
 
@@ -211,12 +294,15 @@ func TestNDJSONKeepsTheFullCounts(t *testing.T) {
 	r.Test = report.Count{Files: 1, Code: 20, Comment: 1, Blank: 2}
 	writeAll(t, w, r)
 
-	var got report.Record
+	var got bucket.Bucket
 	if err := json.Unmarshal([]byte(strings.TrimSpace(readFile(t, path))), &got); err != nil {
 		t.Fatal(err)
 	}
 	if got.Product.Files != 3 || got.Product.Comment != 9 || got.Test.Blank != 2 {
-		t.Errorf("counts did not survive: %+v", got)
+		t.Errorf("bucket counts did not survive: %+v", got)
+	}
+	if rec := got.Last(); rec.Product.Comment != 9 || rec.Test.Blank != 2 {
+		t.Errorf("nested record counts did not survive: %+v", rec)
 	}
 }
 
@@ -252,14 +338,14 @@ func TestCloseFlushesAndReleasesTheFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	start := time.Date(2026, 8, 6, 0, 0, 0, 0, time.UTC)
+	var records []report.Record
 	for i := range 500 {
-		if err := w.Write(rec(6, "abc1234", strings.Repeat("x", i%40+1), i, 0, 0)); err != nil {
-			t.Fatal(err)
-		}
+		// An hour apart, so this is 500 buckets rather than one fat one.
+		records = append(records,
+			recAt(start.Add(time.Duration(i)*time.Hour), "abc1234", strings.Repeat("x", i%40+1), i, 0, 0))
 	}
-	if err := w.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
+	writeAll(t, w, records...)
 
 	rows, err := csv.NewReader(strings.NewReader(readFile(t, path))).ReadAll()
 	if err != nil {

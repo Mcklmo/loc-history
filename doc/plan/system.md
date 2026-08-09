@@ -21,7 +21,8 @@ For every commit on a branch, oldest to newest, it:
 2. Runs `cloc` twice inside Docker — once **excluding** test files, once counting **only**
    test files.
 3. Emits one record (commit, timestamp, product LOC, test LOC, total, signed delta against
-   the previous commit) to a pluggable sink.
+   the previous commit), which is folded into its `--granularity` time bucket and handed to a
+   pluggable sink.
 
 Three sinks ship: a console table, a file (CSV/NDJSON), and a self-contained HTML page that
 charts net change per time bucket for product and test code. Counted commits are cached, so re-running
@@ -83,17 +84,29 @@ history fits the card" — instead a column is never drawn under 1 unit and a hi
 under 4, so a dense stretch merges into a silhouette, which is the honest reading of it. And
 the x-axis unit **adapts for both granularities** rather than special-casing `hour`, which does
 change the daily rendering: a fortnight now carries day labels instead of one bare `Mar 2026`.
-Granularity is a graph concern only; the console and file sinks emit one row per commit and
-have no notion of buckets.
+
+> **WAS ASSUMED — granularity is a graph concern only.** This document previously recorded that
+> "the console and file sinks emit one row per commit and have no notion of buckets". That
+> stopped being true: the user asked for `--granularity` to govern **every** sink. Bucketing
+> moved out of `internal/writer/graph.go` into a new package, `internal/bucket`, and now happens
+> **above** the `Writer` interface — so no sink derives it and none of the three can disagree
+> about what a row is. Writers render what they are handed; none of them truncates a timestamp
+> or groups a record. Three decisions came with it, all the user's: console and CSV emit one row
+> per bucket keeping the bucket's **last** commit as its identity plus a commit count; NDJSON
+> emits one bucket object per line with its records **nested**, so it stays lossless at any
+> width; and there is **no per-commit escape hatch** — no `--granularity=commit`, one
+> vocabulary, `hour` still the default. Nothing about how a bucket is computed changed, which is
+> why all three golden pages still match byte for byte after the move.
 
 Arbitrary widths (`4h`) came later. Two things fell out of the constraint that a bucket must
 **divide 24**. First, `day` is exactly the 24-hour bucket anchored at midnight, so the enum is
 just an hour count and `hour`/`day` are names for `1h`/`24h` — one vocabulary, not two. Second,
 widths like `5h` are refused rather than supported: truncation floors the hour from midnight,
 so a 5-hour bucket would restart every night and leave columns *between* the axis slots, where
-they would silently not be drawn. `NewGraph` enforces the same rule as the flag layer, because
-a library caller can name a bucket the CLI would have rejected. The rejected alternative was
-anchoring the lattice on the epoch, which admits any width but detaches buckets from the clock.
+they would silently not be drawn. `bucket.NewAggregator` enforces the same rule as the flag
+layer, because a library caller can name a bucket the CLI would have rejected. The rejected
+alternative was anchoring the lattice on the epoch, which admits any width but detaches buckets
+from the clock.
 
 ---
 
@@ -195,7 +208,13 @@ confirmed. Every one of these was checked before the code that depends on it was
                   └───────────────┬──────────────────────────┘
                                   ▼
                   ┌──────────────────────────────────────────┐
-                  │ writer.Writer   Write(Record) / Close()  │
+                  │ bucket.Aggregator — THE GRANULARITY GATE │
+                  │  truncate → fold → flush on rollover     │
+                  └───────────────┬──────────────────────────┘
+                                  │ bucket.Bucket {start,gran,commits,Δs,records}
+                                  ▼
+                  ┌──────────────────────────────────────────┐
+                  │ writer.Writer   Write(Bucket) / Close()  │
                   └──┬──────────────┬─────────────────┬──────┘
                      ▼              ▼                 ▼
                   Console          File             Graph
@@ -206,6 +225,14 @@ confirmed. Every one of these was checked before the code that depends on it was
 Everything above `Writer` is orchestration; everything below is rendering. That seam is the
 extension point — a fourth sink is purely additive: implement `Writer`, add its name to
 `knownSinks` in `main.go`, and construct it in the switch in `execute`.
+
+The aggregator sits **above** that seam, which is what makes granularity one decision rather
+than three: it is the only place a timestamp becomes a bucket, and every sink renders what it
+is handed. It **streams** — records arrive oldest first, so a bucket is flushed as soon as a
+record with a later start turns up, and the open one on `Close` — so the console still prints
+as the walk progresses, one bucket behind, rather than buffering the whole history. `pipeline`
+therefore no longer imports `writer` at all; it takes a local `Sink` interface over
+`report.Record`, and `bucket.Aggregator` is what `main` hands it.
 
 ---
 
@@ -228,18 +255,21 @@ loc-history/
       fake.go               FakeRunner — a real local line counter
       testdata/             REAL captured cloc 1.98 output
     cache/                  content-addressed counts on disk
-    pipeline/               worker pool + reorder buffer
+    pipeline/               worker pool + reorder buffer; local Sink interface
+    bucket/
+      granularity.go        Granularity: parse, Valid, Step, Truncate, and the label vocabulary
+      bucket.go             Bucket, Sink, streaming Aggregator — the granularity gate
     writer/
       writer.go             Writer interface + MultiWriter
       console.go            streaming table
       file.go               csv / ndjson
       graph.go              chart geometry + view model
       graph_template.go     the self-contained page
-      testdata/golden.html
+      testdata/golden*.html
     gittest/                throwaway repositories for tests
 ```
 
-**137 test functions.** Everything except the `cloc` container tests runs without Docker and
+**166 test functions.** Everything except the `cloc` container tests runs without Docker and
 without a network; the container tests skip themselves under `-short` or a stopped daemon.
 
 ---
@@ -287,39 +317,102 @@ than clamping to zero.
 `Finalize` takes the previous total explicitly because only the emitter knows commit order.
 
 ```go
+// internal/bucket
+
+type Granularity int // hours per bucket; must divide 24
+const (
+    GranularityHour Granularity = 1
+    GranularityDay  Granularity = 24
+)
+func ParseGranularity(s string) (Granularity, error) // "hour" | "day" | "4h"
+
+type Bucket struct {
+    Start   time.Time   // floored commit time, relabelled UTC
+    Gran    Granularity // self-describing: the sinks read the width here
+    Commits int
+
+    Product   report.Count // the tree at the bucket's LAST commit
+    Test      report.Count
+    TotalCode int
+
+    ProductDelta int // summed net change across the bucket's commits;
+    TestDelta    int // ProductDelta + TestDelta == Delta
+    Delta        int
+
+    Skipped bool // the folder was absent at the bucket's last commit
+
+    Records []report.Record
+}
+func (b Bucket) Last() report.Record // never empty by construction
+
+type Sink interface {                 // writer.Writer satisfies this
+    Write(Bucket) error               // structurally, so bucket never
+    Close() error                     // imports writer and there is no cycle
+}
+
+func NewAggregator(g Granularity, sink Sink) (*Aggregator, error)
+func (a *Aggregator) Write(r report.Record) error
+func (a *Aggregator) Close() error
+```
+
+A bucket keeps its **last** commit's identity because a row still has to name something you can
+go and look at, and the snapshot columns describe the tree as it stood when the slice of time
+ended. `Records` is what keeps NDJSON lossless at any width.
+
+The aggregator rolls over only on a **strictly later** start. `pipeline` emits oldest-first,
+but `git log --reverse` follows the commit graph rather than committer dates, so a record can
+in principle arrive with an earlier timestamp; folding it into the open bucket keeps one bucket
+per lattice slot, where opening a second with an already-emitted start would give the graph two
+rows for one slot and its lookup would silently drop one. `Close` flushes the open bucket and
+then closes the sink **regardless** of whether the flush failed, joining both — which is what
+preserves the close-exactly-once guarantee through the new layer.
+
+```go
 // internal/writer
 
 type Writer interface {
-    Write(r report.Record) error
+    Write(b bucket.Bucket) error
     Close() error
 }
 
 func MultiWriter(ws ...Writer) Writer
 ```
 
-`MultiWriter` offers each record to **every** sink even after one fails, returning the first
+`MultiWriter` offers each bucket to **every** sink even after one fails, returning the first
 error — a broken console should not cost you the HTML report. `Close` closes all of them
 regardless, joining errors with `errors.Join`, so a failing file sink cannot leak the graph
 sink's file handle. `pipeline.Run` calls `Close` exactly once via `defer`, **including on
 every error path**, so an aborted run still leaves a partial artifact.
 
-### `Console` — streams, one line per commit
+### `Console` — streams, one line per bucket
 
 ```
-DATE        SHA      PRODUCT    TEST     TOTAL       Δ  SUBJECT
-2026-08-09  fb31941        -       -         -      +0  chore: scaffold Go module, git repo…
-2026-08-09  f9d02a4      145     320       465    +465  feat(report,writer): domain types, …
-2026-08-09  bfb7e01      225     536       761    +296  feat(gitlog): enumerate branch comm…
+HOUR              SHA      COMMITS  PRODUCT    TEST     TOTAL       Δ  SUBJECT
+2026-08-09 15:00  fb31941        1        -       -         -      +0  chore: scaffold Go mod…
+2026-08-09 16:00  f9d02a4        3      145     320       465    +465  feat(report,writer): d…
+2026-08-09 20:00  bfb7e01        2      225     536       761    +296  feat(gitlog): enumerat…
 ```
 
-Dashes, not zeroes, where the source folder was absent: zero and absent are different facts.
+The header is written lazily, on the first bucket, which is what lets its first column name the
+unit actually in play — `Column()` yields `Hour` / `Date` / `Bucket start`. SHA and subject come
+from `Last()`. Dashes, not zeroes, where the source folder was absent: zero and absent are
+different facts.
 
 ### `File` — `--file-format=csv` (default) or `ndjson`
 
-CSV columns: `sha,short,timestamp,author,subject,product_code,test_code,total_code,delta,skipped`.
-The tenth column is beyond the original nine because without it an absent folder and an empty
-one both read as zero. NDJSON emits the whole `Record` per line, keeping the file/comment/blank
-counts the CSV projection drops.
+CSV columns:
+`bucket_start,commits,last_sha,last_short,last_author,last_subject,product_code,test_code,total_code,product_delta,test_delta,delta,skipped`.
+
+The header is fixed rather than derived from the granularity, because it goes out before the
+first bucket exists and so cannot name the unit; `bucket_start` is RFC 3339 at every width
+instead. The `last_*` prefixes are deliberate — the semantics changed, so the names should too,
+rather than silently repurposing `sha`. `product_delta`/`test_delta` let a spreadsheet
+reproduce the two charts. `skipped` is beyond the original specification because without it an
+absent folder and an empty one both read as zero.
+
+NDJSON emits the whole `Bucket` per line with its `Records` **nested**, which is what keeps the
+file lossless however wide the bucket, and keeps the file/comment/blank counts the CSV
+projection drops.
 
 ### `Graph` — buffers, renders on `Close`
 
@@ -332,13 +425,18 @@ inclusive, so quiet stretches take up room. One column per bucket, its value the
 per-category snapshot delta of every commit in it**, drawn up from a zero line where the tree
 grew and down where it shrank.
 
-A bucket is an **hour** by default, a **calendar day** under `--granularity=day`, or any width
-in hours that divides 24 (`4h`). `Granularity` is simply that hour count: `GranularityHour` is
-1 and `GranularityDay` is 24, because a 24-hour bucket anchored at midnight *is* a calendar
-day. It carries the rest of the difference as methods (`step`, `noun`, `column`, `titleFormat`,
-`rowFormat`), so no call site branches on it.
+The graph **derives no bucketing of its own**. It buffers the `bucket.Bucket`s it is handed and
+reads the width off the first of them — `GraphOptions` has no `Granularity` field, so the page
+cannot name one unit while charting another. An empty history has nothing to read it off and
+falls back to hourly.
 
-`Granularity.truncate` is the single point where a timestamp becomes a bucket: it reads the
+A bucket is an **hour** by default, a **calendar day** under `--granularity=day`, or any width
+in hours that divides 24 (`4h`). `bucket.Granularity` is simply that hour count:
+`GranularityHour` is 1 and `GranularityDay` is 24, because a 24-hour bucket anchored at midnight
+*is* a calendar day. It carries the rest of the difference as methods (`Step`, `Noun`, `Column`,
+`TitleFormat`, `RowFormat`), so no call site branches on it.
+
+`Granularity.Truncate` is the single point where a timestamp becomes a bucket: it reads the
 wall clock in the commit's own zone — git hands back `%cI` with its offset intact — floors the
 hour to a multiple of the bucket width counting from midnight, and relabels the result as UTC.
 So a commit at `23:00+02:00` buckets on its author's own evening, and because every bucket time
@@ -347,19 +445,19 @@ is then UTC, all downstream arithmetic is exact and no DST discontinuity can sho
 Dividing 24 is a **correctness** constraint, not a style rule. The axis reads slot *i* as
 `first + i×step`; a width that does not tile the day (`5h`) would restart the sequence at every
 midnight, putting bucket starts between slots where they would be looked up, missed, and never
-drawn. `ParseGranularity` and `NewGraph` both refuse those widths.
+drawn. `ParseGranularity` and `NewAggregator` both refuse those widths.
 
-Per record, in the order the sink receives them:
+Per record, in the order the aggregator receives them:
 
 ```
 productΔ = r.Product.Code − prevProduct
 testΔ    = r.Test.Code    − prevTest
 ```
 
-with `prevProduct`/`prevTest` starting at 0 — including across `Skipped` commits, whose counts
-are 0 — mirroring `Finalize`'s `prevTotal` convention. That makes `productΔ + testΔ == Delta`
-hold for every record, so the charts and the commit table can never disagree. A test asserts
-it. **No `git diff --numstat` is involved**: these are net counts differenced from tree
+with `prevProduct`/`prevTest` starting at 0 and running *across* bucket boundaries — including
+across `Skipped` commits, whose counts are 0 — mirroring `Finalize`'s `prevTotal` convention.
+That makes `productΔ + testΔ == Delta` hold for every record and for every bucket, so the
+charts, the two table views and the CSV can never disagree. A test asserts it. **No `git diff --numstat` is involved**: these are net counts differenced from tree
 snapshots, so a commit that rewrites 100 lines in place nets to zero and draws no column. The
 figure caption says so.
 
@@ -503,6 +601,10 @@ skipped, because one bad commit should not cost a multi-minute rebuild. `--fail-
 into cancelling the context on the first error. A *write* failure does abort: the sink is the
 point of the exercise.
 
+`pipeline` declares its own `Sink` interface over `report.Record` rather than importing
+`writer`, so it does not know that buckets exist and cannot be broken by a change to them.
+`bucket.Aggregator` is the shipped implementation `main` hands it.
+
 ### `cache`
 
 A commit tree is immutable, so `(sha, folder, testRegex, clocVersion)` → counts is a pure
@@ -535,8 +637,9 @@ loc-history [flags]
   --file-out string      (default "loc-history.csv")
   --file-format string   csv | ndjson (default "csv")
   --graph-out string     (default "loc-history.html")
-  --granularity string   graph time bucket: hour | day | Nh (default "hour")
+  --granularity string   output time bucket: hour | day | Nh (default "hour")
                          N must divide 24: 1, 2, 3, 4, 6, 8, 12, 24
+                         applies to every sink: one row per bucket, everywhere
 
   --jobs int             concurrent commits (default 4)
   --work-dir string      scratch root (default "/tmp")
@@ -568,8 +671,13 @@ The load-bearing assertions:
   deletion.
 - An absent source folder yields `Skipped: true`, not an error.
 - Deleted files do not leak between commits.
-- Graph HTML matches `testdata/golden.html`, contains no external reference, and escapes
-  hostile commit subjects.
+- `productΔ + testΔ == Delta` per record *and* per bucket, at every granularity.
+- A bucket reaches the sink only once no later record could still join it, the open one is
+  flushed on `Close`, and the sink is closed exactly once even when that flush fails.
+- Graph HTML matches `testdata/golden.html`, `golden-day.html` and `golden-4h.html` — the three
+  survived the move of bucketing out of the graph **byte for byte, without `-update`**, which
+  is the proof that the refactor changed no arithmetic. It contains no external reference and
+  escapes hostile commit subjects.
 
 ### End-to-end — with Docker running
 

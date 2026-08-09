@@ -13,17 +13,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mcklmo/loc-history/internal/report"
+	"github.com/mcklmo/loc-history/internal/bucket"
 )
 
-// Format selects how File serialises records.
+// Format selects how File serialises buckets.
 type Format int
 
 const (
-	// FormatCSV writes a header row and one line per commit: a flat
+	// FormatCSV writes a header row and one line per bucket: a flat
 	// projection meant for a spreadsheet.
 	FormatCSV Format = iota + 1
-	// FormatNDJSON writes the whole Record per line, for piping to jq.
+	// FormatNDJSON writes the whole Bucket per line, its records nested, for
+	// piping to jq. That is what keeps the file lossless at any granularity.
 	FormatNDJSON
 )
 
@@ -39,17 +40,25 @@ func ParseFormat(s string) (Format, error) {
 	}
 }
 
-// csvHeader is the documented column list.
+// csvHeader is the documented column list. It is fixed rather than derived from
+// the granularity, because it goes out before the first bucket exists and so
+// cannot name the unit; `bucket_start` is RFC 3339 at every width instead.
 //
-// The trailing `skipped` column is not in the original specification but the
-// nine columns before it cannot express the difference between "the folder was
-// not there" and "the folder was there and empty" — both read as zero.
+// The `last_*` prefixes say what the identity columns now mean: one row is a
+// slice of time, and the commit named in it is the last one that landed in the
+// slice. `product_delta`/`test_delta` let a reader reproduce the two charts.
+//
+// The trailing `skipped` column cannot be inferred from the counts before it:
+// they cannot express the difference between "the folder was not there" and
+// "the folder was there and empty" — both read as zero.
 var csvHeader = []string{
-	"sha", "short", "timestamp", "author", "subject",
-	"product_code", "test_code", "total_code", "delta", "skipped",
+	"bucket_start", "commits",
+	"last_sha", "last_short", "last_author", "last_subject",
+	"product_code", "test_code", "total_code",
+	"product_delta", "test_delta", "delta", "skipped",
 }
 
-// File streams records to disk as CSV or NDJSON.
+// File streams buckets to disk as CSV or NDJSON.
 type File struct {
 	path string
 	f    *os.File
@@ -90,22 +99,26 @@ func NewFile(path string, format Format) (*File, error) {
 	return w, nil
 }
 
-func (w *File) Write(r report.Record) error {
+func (w *File) Write(b bucket.Bucket) error {
 	if w.csv != nil {
+		last := b.Last()
 		return w.csv.Write([]string{
-			r.SHA,
-			r.Short,
-			r.Timestamp.Format(time.RFC3339),
-			r.Author,
-			r.Subject,
-			strconv.Itoa(r.Product.Code),
-			strconv.Itoa(r.Test.Code),
-			strconv.Itoa(r.TotalCode),
-			strconv.Itoa(r.Delta),
-			strconv.FormatBool(r.Skipped),
+			b.Start.Format(time.RFC3339),
+			strconv.Itoa(b.Commits),
+			last.SHA,
+			last.Short,
+			last.Author,
+			last.Subject,
+			strconv.Itoa(b.Product.Code),
+			strconv.Itoa(b.Test.Code),
+			strconv.Itoa(b.TotalCode),
+			strconv.Itoa(b.ProductDelta),
+			strconv.Itoa(b.TestDelta),
+			strconv.Itoa(b.Delta),
+			strconv.FormatBool(b.Skipped),
 		})
 	}
-	return w.enc.Encode(r)
+	return w.enc.Encode(b)
 }
 
 // Close flushes buffered rows and releases the file. Skipping it would lose

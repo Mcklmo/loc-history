@@ -5,14 +5,14 @@ life of a branch.
 
 For every commit on a branch, oldest to newest, `loc-history` materialises that commit's
 source folder into a scratch directory, runs `cloc` twice inside Docker — once excluding test
-files, once counting only test files — and emits one record per commit to a console table, a
-CSV/NDJSON file, or a self-contained HTML page charting the two over time.
+files, once counting only test files — and emits one row per `--granularity` time bucket to a
+console table, a CSV/NDJSON file, or a self-contained HTML page charting the two over time.
 
 ```console
 $ loc-history --repo=~/code/my-app --folder=src --branch=main
-DATE        SHA      PRODUCT    TEST     TOTAL       Δ  SUBJECT
-2026-06-22  3a20694      887       0       887    +887  udpate io
-2026-06-24  25eca54      895       0       895      +8  fix: use comma in csv output for a…
+HOUR              SHA      COMMITS  PRODUCT    TEST     TOTAL       Δ  SUBJECT
+2026-06-22 14:00  3a20694        1      887       0       887    +887  udpate io
+2026-06-24 09:00  25eca54        2      895       0       895      +8  fix: use comma in csv o…
 5 commits, 3 skipped, 0 failed in 790ms
 ```
 
@@ -148,14 +148,22 @@ loc-history --repo=~/code/my-app --folder=src --limit=5
 `--out` takes a comma-separated list; one walk can feed several sinks at once
 (`--out=console,file,graph`).
 
-**`console`** (default) — streams a table, one line per commit, as the walk progresses.
-A dash rather than a zero means the source folder did not exist at that commit: zero lines and
-no folder are different facts.
+Every sink is fed the same buckets, so the three can never disagree about what a row is:
+`--granularity` is applied once, above them all (see below).
+
+**`console`** (default) — streams a table, one line per bucket, as the walk progresses. The
+first column is headed by the unit in play (`HOUR`, `DATE`, or `BUCKET START` for a width like
+`4h`) and `COMMITS` says how many commits merged into the row; the SHA and subject are the
+bucket's **last** commit, so the row still names something you can go and look at. A dash
+rather than a zero means the source folder did not exist at that commit: zero lines and no
+folder are different facts.
 
 **`file`** — `--file-format=csv` (default) or `ndjson`, written to `--file-out`.
-CSV columns: `sha,short,timestamp,author,subject,product_code,test_code,total_code,delta,skipped`.
-NDJSON emits the whole record per line, keeping the file/comment/blank counts the CSV
-projection drops.
+CSV columns: `bucket_start,commits,last_sha,last_short,last_author,last_subject,product_code,test_code,total_code,product_delta,test_delta,delta,skipped`.
+`bucket_start` is RFC 3339 at every granularity; the `last_*` columns are the bucket's last
+commit; `product_delta` and `test_delta` are what let a spreadsheet reproduce the two charts.
+NDJSON emits one bucket per line **with its records nested**, so it stays lossless at any
+granularity and keeps the file/comment/blank counts the CSV projection drops.
 
 **`graph`** — one self-contained HTML file at `--graph-out`. Inlined CSS and SVG, no scripts,
 no external URLs, so it opens straight from disk and survives being emailed.
@@ -167,10 +175,18 @@ added and red for removed. Both charts sit on **one shared y scale**, so a +2000
 is visibly ten times a +200 test bucket and the two are read against each other rather than
 side by side.
 
-`--granularity` takes `hour` (the default), `day`, or a bucket width in whole hours like `4h`.
+### `--granularity`
+
+`--granularity` takes `hour` (the default), `day`, or a bucket width in whole hours like `4h`,
+and it governs **every sink**, not just the graph: commits sharing a bucket merge into one
+console row, one CSV row, and one column. The bucketing happens once, between the walk and the
+sinks, so nothing downstream reinterprets it. There is no per-commit escape hatch — one
+vocabulary, and NDJSON is where the individual commits survive.
+
 The default is hourly because a day-wide bucket collapses an afternoon of work into a single
-column, which on a young repo is the whole history. The x axis labels itself in whatever unit
-the span calls for — hours, days, or months — so three hours of work reads as three hours.
+row, which on a young repo is the whole history. In the graph, the x axis labels itself in
+whatever unit the span calls for — hours, days, or months — so three hours of work reads as
+three hours.
 
 A bucket has to **divide the day**: `1, 2, 3, 4, 6, 8, 12` or `24` hours, so `hour` is `1h` and
 `day` is `24h`. Buckets are anchored at midnight — a `4h` axis runs `00:00, 04:00, …` — which
@@ -204,8 +220,9 @@ loc-history [flags]
   --file-out string      path for the file sink (default "loc-history.csv")
   --file-format string   csv | ndjson (default "csv")
   --graph-out string     path for the graph sink (default "loc-history.html")
-  --granularity string   graph time bucket: hour | day | Nh, e.g. 4h (default "hour")
+  --granularity string   output time bucket: hour | day | Nh, e.g. 4h (default "hour")
                          N must divide 24: 1, 2, 3, 4, 6, 8, 12, 24
+                         applies to every sink, not just the graph
 
   --jobs int             commits processed concurrently (default 4)
   --work-dir string      scratch root; must be a path Docker may bind-mount (default "/tmp")
@@ -253,6 +270,7 @@ degrades to a recount rather than to a wrong number.
 |---|---|
 | `docker daemon unavailable: start Docker Desktop and try again` | Docker is installed but not running. |
 | `git log main in …: fatal: ambiguous argument 'main'` | The target repo's trunk is not `main`. Pass `--branch=master` (or whatever `git -C <repo> branch --show-current` reports). |
+| Fewer rows than commits | Expected: a row is a `--granularity` bucket, and its `COMMITS` column says how many merged into it. Narrow the bucket, or use `--file-format=ndjson`, whose nested `records` keep every commit. |
 | Every row is dashes, `N skipped` | `--folder` does not exist at those commits. Either the path is wrong (`--folder=src` is the default and many repos have no `src/`), or the early history genuinely predates the directory. Try `--folder=` to count the whole tree. |
 | `TEST` is always `0` | `--test-regex` does not match this project's test files. See the recipes above; remember it matches the **basename**, not the path. |
 | `scratch directory is not visible inside the container` | `--work-dir` points somewhere Docker Desktop does not share. Use the default `/tmp`, or add the path in Docker Desktop → Settings → Resources → File sharing. |
@@ -264,7 +282,7 @@ degrades to a recount rather than to a wrong number.
 ## Development
 
 ```bash
-go test ./...          # 137 test functions
+go test ./...          # 166 test functions
 go test -race ./...    # also clean
 go test -short ./...   # skips the container tests
 ```
