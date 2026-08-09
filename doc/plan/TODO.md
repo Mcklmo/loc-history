@@ -20,7 +20,10 @@ then a commit.
 - [x] **4. `cloc`** — `Runner`/`Options`, parser written against captured cloc 1.98 bytes,
       `DockerRunner`, `VerifyMount` preflight canary, `FakeRunner` (a real local counter).
       21 tests, container ones skipped under `-short` or a stopped daemon.
-- [ ] 5. `pipeline` — worker pool + reorder buffer
+- [x] **5. `pipeline`** — worker pool, reorder buffer, emit-time deltas, per-commit scratch
+      dirs, tolerant error policy with `--fail-fast` opt-in, sink closed exactly once on every
+      path. 14 tests; the ordering test was mutation-checked (removing the buffer fails it) and
+      passes under `-race`.
 - [ ] 6. `main.go` — flags and wiring, first real run
 - [ ] 7. `cache`
 - [ ] 8. `FileWriter`
