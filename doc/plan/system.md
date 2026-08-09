@@ -59,7 +59,7 @@ These were explicitly chosen from presented alternatives. **Do not re-open them.
 | 5 | Go installation | Official tarball to `/usr/local/go` | Homebrew; a version manager |
 | 6 | Test corpus | This repository and synthetic fixtures | A neighbouring `timeseries-visualizer` project, later ruled out of scope |
 | 7 | Graph form | **Two diverging column charts over time** — product and test, one column per time bucket, one shared y scale | A GitHub-contributions calendar heat map (shipped first, superseded); two-sided add/remove bars; a dual axis |
-| 8 | Graph time bucket | **`--granularity=hour` (default) or `day`**, with floored column widths and an adaptive x-axis unit | A wider viewBox with horizontal scrolling; month labels for `day` and a special case for `hour` |
+| 8 | Graph time bucket | **`--granularity=hour` (default), `day`, or a width in hours like `4h`**, with floored column widths and an adaptive x-axis unit | A wider viewBox with horizontal scrolling; month labels for `day` and a special case for `hour`; `hour:4` and `"hour 4"` spellings; accepting widths that do not divide 24 |
 
 On decision 2: the original request said output is "written to a `Reader` interface", but all
 three implementations are writers. The user resolved the contradiction in favour of the
@@ -85,6 +85,15 @@ the x-axis unit **adapts for both granularities** rather than special-casing `ho
 change the daily rendering: a fortnight now carries day labels instead of one bare `Mar 2026`.
 Granularity is a graph concern only; the console and file sinks emit one row per commit and
 have no notion of buckets.
+
+Arbitrary widths (`4h`) came later. Two things fell out of the constraint that a bucket must
+**divide 24**. First, `day` is exactly the 24-hour bucket anchored at midnight, so the enum is
+just an hour count and `hour`/`day` are names for `1h`/`24h` — one vocabulary, not two. Second,
+widths like `5h` are refused rather than supported: truncation floors the hour from midnight,
+so a 5-hour bucket would restart every night and leave columns *between* the axis slots, where
+they would silently not be drawn. `NewGraph` enforces the same rule as the flag layer, because
+a library caller can name a bucket the CLI would have rejected. The rejected alternative was
+anchoring the lattice on the epoch, which admits any width but detaches buckets from the clock.
 
 ---
 
@@ -323,13 +332,22 @@ inclusive, so quiet stretches take up room. One column per bucket, its value the
 per-category snapshot delta of every commit in it**, drawn up from a zero line where the tree
 grew and down where it shrank.
 
-A bucket is an **hour** by default or a **calendar day** under `--granularity=day`.
+A bucket is an **hour** by default, a **calendar day** under `--granularity=day`, or any width
+in hours that divides 24 (`4h`). `Granularity` is simply that hour count: `GranularityHour` is
+1 and `GranularityDay` is 24, because a 24-hour bucket anchored at midnight *is* a calendar
+day. It carries the rest of the difference as methods (`step`, `noun`, `column`, `titleFormat`,
+`rowFormat`), so no call site branches on it.
+
 `Granularity.truncate` is the single point where a timestamp becomes a bucket: it reads the
-wall clock in the commit's own zone — git hands back `%cI` with its offset intact — and
-relabels that as UTC. So a commit at `23:00+02:00` buckets on its author's own evening, and
-because every bucket time is then UTC, all downstream arithmetic is exact and no DST
-discontinuity can shorten a step. The enum carries the rest of the difference as methods
-(`step`, `noun`, `column`, `titleFormat`, `rowFormat`), so no call site branches on it.
+wall clock in the commit's own zone — git hands back `%cI` with its offset intact — floors the
+hour to a multiple of the bucket width counting from midnight, and relabels the result as UTC.
+So a commit at `23:00+02:00` buckets on its author's own evening, and because every bucket time
+is then UTC, all downstream arithmetic is exact and no DST discontinuity can shorten a step.
+
+Dividing 24 is a **correctness** constraint, not a style rule. The axis reads slot *i* as
+`first + i×step`; a width that does not tile the day (`5h`) would restart the sequence at every
+midnight, putting bucket starts between slots where they would be looked up, missed, and never
+drawn. `ParseGranularity` and `NewGraph` both refuse those widths.
 
 Per record, in the order the sink receives them:
 
@@ -517,7 +535,8 @@ loc-history [flags]
   --file-out string      (default "loc-history.csv")
   --file-format string   csv | ndjson (default "csv")
   --graph-out string     (default "loc-history.html")
-  --granularity string   graph time bucket: hour | day (default "hour")
+  --granularity string   graph time bucket: hour | day | Nh (default "hour")
+                         N must divide 24: 1, 2, 3, 4, 6, 8, 12, 24
 
   --jobs int             concurrent commits (default 4)
   --work-dir string      scratch root (default "/tmp")

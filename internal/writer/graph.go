@@ -56,63 +56,89 @@ const (
 	maxAxisLabels = 20
 )
 
-// Granularity is the slice of time one column covers.
+// Granularity is the slice of time one column covers, counted in hours.
+//
+// It must divide 24. That is what keeps every bucket on a wall-clock boundary
+// and, more importantly, keeps the x axis an evenly spaced lattice: the
+// geometry below reads slot i as first + i×step, so a bucket landing between
+// two slots would simply never be drawn. A 5-hour bucket restarts at midnight
+// and does exactly that.
 type Granularity int
 
 const (
 	// GranularityHour buckets commits by the hour they landed. It is the
 	// default: a day-wide bucket collapses a whole afternoon of work into a
 	// single column, which on a young repo is the whole history.
-	GranularityHour Granularity = iota + 1
-	GranularityDay
+	GranularityHour Granularity = 1
+	// GranularityDay is the 24-hour bucket anchored at midnight, which is
+	// exactly a calendar day — so one hour count expresses both.
+	GranularityDay Granularity = 24
 )
 
-// ParseGranularity converts a --granularity value.
+// ParseGranularity converts a --granularity value: the words hour and day, or a
+// bucket width in whole hours, like 4h.
 func ParseGranularity(s string) (Granularity, error) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
+	raw := strings.ToLower(strings.TrimSpace(s))
+	switch raw {
 	case "hour":
 		return GranularityHour, nil
 	case "day":
 		return GranularityDay, nil
-	default:
-		return 0, fmt.Errorf("unknown granularity %q; want hour or day", s)
 	}
+
+	digits, ok := strings.CutSuffix(raw, "h")
+	if !ok {
+		return 0, fmt.Errorf("unknown granularity %q; want hour, day, or a bucket width like 4h", s)
+	}
+	n, err := strconv.Atoi(digits)
+	if err != nil {
+		return 0, fmt.Errorf("unknown granularity %q; want hour, day, or a bucket width like 4h", s)
+	}
+	if g := Granularity(n); g.valid() {
+		return g, nil
+	}
+	return 0, fmt.Errorf("bucket %q does not divide the day; want 1, 2, 3, 4, 6, 8, 12 or 24 hours", s)
 }
 
+// valid reports whether buckets this wide tile a day exactly.
+func (g Granularity) valid() bool { return g >= 1 && g <= 24 && 24%int(g) == 0 }
+
 // step is how much time one slot on the x axis covers.
-func (g Granularity) step() time.Duration {
-	if g == GranularityDay {
-		return 24 * time.Hour
-	}
-	return time.Hour
-}
+func (g Granularity) step() time.Duration { return time.Duration(g) * time.Hour }
 
 // truncate is the single point at which a timestamp becomes a bucket. It reads
 // the wall clock in the commit's own zone — git hands back %cI with its offset
 // intact — and relabels that as UTC. So a commit at 23:00+02:00 buckets on its
 // author's own evening, and because every bucket time is UTC, the arithmetic
 // downstream is exact: no DST discontinuity can shorten a step.
+//
+// The hour is floored to a multiple of the bucket width, counting from
+// midnight, so a 4-hour axis runs 00:00, 04:00, … and a 24-hour one is the
+// calendar day.
 func (g Granularity) truncate(t time.Time) time.Time {
-	hour := t.Hour()
-	if g == GranularityDay {
-		hour = 0
-	}
+	hour := t.Hour() - t.Hour()%int(g)
 	return time.Date(t.Year(), t.Month(), t.Day(), hour, 0, 0, 0, time.UTC)
 }
 
 // noun names a bucket in prose, column heads its table.
 func (g Granularity) noun() string {
-	if g == GranularityDay {
+	switch g {
+	case GranularityHour:
+		return "hour"
+	case GranularityDay:
 		return "day"
 	}
-	return "hour"
+	return fmt.Sprintf("%d hours", int(g))
 }
 
 func (g Granularity) column() string {
-	if g == GranularityDay {
+	switch g {
+	case GranularityHour:
+		return "Hour"
+	case GranularityDay:
 		return "Date"
 	}
-	return "Hour"
+	return "Bucket start"
 }
 
 // titleFormat stamps a tooltip, rowFormat a table cell.
@@ -157,6 +183,11 @@ func NewGraph(path string, opts GraphOptions) (*Graph, error) {
 	}
 	if opts.Granularity == 0 {
 		opts.Granularity = GranularityHour
+	}
+	// A bucket that does not tile the day would leave columns off the lattice
+	// the axis is drawn on, and they would vanish rather than misdraw.
+	if !opts.Granularity.valid() {
+		return nil, fmt.Errorf("granularity: a %d-hour bucket does not divide the day", opts.Granularity)
 	}
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -383,10 +414,10 @@ func (g *Graph) build() pageData {
 	noun := gran.noun()
 	p.Charts = []chart{
 		buildChart("Product files",
-			fmt.Sprintf("Column chart of the net change in product lines of code each %s. The same values are listed in the by-%s table below.", noun, noun),
+			fmt.Sprintf("Column chart of the net change in product lines of code each %s. The same values are listed in the table below.", noun),
 			buckets, ax, func(b *bucket) int { return b.product }),
 		buildChart("Test files",
-			fmt.Sprintf("Column chart of the net change in test lines of code each %s, on the same scale as the product chart. The same values are listed in the by-%s table below.", noun, noun),
+			fmt.Sprintf("Column chart of the net change in test lines of code each %s, on the same scale as the product chart. The same values are listed in the table below.", noun),
 			buckets, ax, func(b *bucket) int { return b.test }),
 	}
 	p.Key = []legendSwatch{
@@ -596,7 +627,7 @@ const (
 // month is the floor: past a couple of dozen months the claiming below thins
 // them, which is the right reading of a long history.
 func pickLabelUnit(ax axis) labelUnit {
-	if ax.gran == GranularityHour && ax.span <= maxAxisLabels {
+	if ax.gran < GranularityDay && ax.span <= maxAxisLabels {
 		return unitHour
 	}
 	last := ax.at(ax.span - 1)

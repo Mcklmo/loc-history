@@ -161,15 +161,20 @@ projection drops.
 no external URLs, so it opens straight from disk and survives being emailed.
 
 Two column charts, one for product files and one for test files. Time runs along the x axis,
-one column per `--granularity` bucket — an hour by default, or a calendar day; the column is
-the **summed net change of that bucket's commits**, drawn up from a zero line where the tree
-grew and down where it shrank, blue for added and red for removed. Both charts sit on **one
-shared y scale**, so a +2000 product bucket is visibly ten times a +200 test bucket and the two
-are read against each other rather than side by side.
+one column per `--granularity` bucket; the column is the **summed net change of that bucket's
+commits**, drawn up from a zero line where the tree grew and down where it shrank, blue for
+added and red for removed. Both charts sit on **one shared y scale**, so a +2000 product bucket
+is visibly ten times a +200 test bucket and the two are read against each other rather than
+side by side.
 
+`--granularity` takes `hour` (the default), `day`, or a bucket width in whole hours like `4h`.
 The default is hourly because a day-wide bucket collapses an afternoon of work into a single
 column, which on a young repo is the whole history. The x axis labels itself in whatever unit
 the span calls for — hours, days, or months — so three hours of work reads as three hours.
+
+A bucket has to **divide the day**: `1, 2, 3, 4, 6, 8, 12` or `24` hours, so `hour` is `1h` and
+`day` is `24h`. Buckets are anchored at midnight — a `4h` axis runs `00:00, 04:00, …` — which
+is what keeps the slots evenly spaced. `5h` would restart at every midnight and is refused.
 
 Those values are **net counts differenced from the cloc snapshot of each commit, not diff line
 counts**: a commit that rewrites 100 lines in place nets to zero and draws no column. Every
@@ -199,7 +204,8 @@ loc-history [flags]
   --file-out string      path for the file sink (default "loc-history.csv")
   --file-format string   csv | ndjson (default "csv")
   --graph-out string     path for the graph sink (default "loc-history.html")
-  --granularity string   graph time bucket: hour | day (default "hour")
+  --granularity string   graph time bucket: hour | day | Nh, e.g. 4h (default "hour")
+                         N must divide 24: 1, 2, 3, 4, 6, 8, 12, 24
 
   --jobs int             commits processed concurrently (default 4)
   --work-dir string      scratch root; must be a path Docker may bind-mount (default "/tmp")

@@ -51,7 +51,7 @@ func TestParseFlagsReadsEveryFlag(t *testing.T) {
 	cfg, err := parseFlags([]string{
 		"--repo=/x", "--branch=trunk", "--folder=lib", "--test-regex=_test\\.go$",
 		"--out=console", "--jobs=8", "--work-dir=/var/tmp", "--first-parent=false",
-		"--limit=5", "--fail-fast", "--image=custom/cloc:2", "--granularity=day",
+		"--limit=5", "--fail-fast", "--image=custom/cloc:2", "--granularity=4h",
 	}, new(bytes.Buffer))
 	if err != nil {
 		t.Fatalf("parseFlags() error = %v", err)
@@ -72,8 +72,8 @@ func TestParseFlagsReadsEveryFlag(t *testing.T) {
 	if cfg.Image != "custom/cloc:2" {
 		t.Errorf("image = %q", cfg.Image)
 	}
-	if cfg.Granularity != writer.GranularityDay {
-		t.Errorf("granularity = %d, want day", cfg.Granularity)
+	if cfg.Granularity != 4 {
+		t.Errorf("granularity = %d, want a 4-hour bucket", cfg.Granularity)
 	}
 }
 
@@ -90,6 +90,7 @@ func TestParseFlagsRejectsBadInput(t *testing.T) {
 		{"negative limit", []string{"--limit=-3"}, "limit"},
 		{"invalid regex", []string{"--test-regex=[unclosed"}, "test-regex"},
 		{"unknown granularity", []string{"--granularity=week"}, "granularity"},
+		{"granularity that does not tile a day", []string{"--granularity=5h"}, "divide the day"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

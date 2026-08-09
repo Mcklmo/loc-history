@@ -101,6 +101,7 @@ func TestGraphMatchesGolden(t *testing.T) {
 	}{
 		{"hour", GranularityHour, "golden.html"},
 		{"day", GranularityDay, "golden-day.html"},
+		{"4h", 4, "golden-4h.html"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got := renderGraphAt(t, graphFixture(), tt.gran)
@@ -571,30 +572,21 @@ func TestTileSpanNamesOneDayOnce(t *testing.T) {
 
 func TestParseGranularity(t *testing.T) {
 	for _, tt := range []struct {
-		in      string
-		want    Granularity
-		wantErr bool
+		in   string
+		want Granularity
 	}{
-		{in: "hour", want: GranularityHour},
-		{in: "day", want: GranularityDay},
-		{in: "HOUR", want: GranularityHour},
-		{in: " day ", want: GranularityDay},
-		{in: "week", wantErr: true},
-		{in: "", wantErr: true},
+		{"hour", GranularityHour},
+		{"day", GranularityDay},
+		{"HOUR", GranularityHour},
+		{" day ", GranularityDay},
+		{"4h", 4},
+		{"12H", 12},
+		// The words and the widths are one vocabulary, not two.
+		{"1h", GranularityHour},
+		{"24h", GranularityDay},
 	} {
 		t.Run(tt.in, func(t *testing.T) {
 			got, err := ParseGranularity(tt.in)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("ParseGranularity(%q) = %v, want an error", tt.in, got)
-				}
-				for _, want := range []string{"hour", "day"} {
-					if !strings.Contains(err.Error(), want) {
-						t.Errorf("error %q should name the accepted value %q", err, want)
-					}
-				}
-				return
-			}
 			if err != nil {
 				t.Fatalf("ParseGranularity(%q) error = %v", tt.in, err)
 			}
@@ -602,6 +594,130 @@ func TestParseGranularity(t *testing.T) {
 				t.Errorf("ParseGranularity(%q) = %d, want %d", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseGranularityRejectsBucketsThatDoNotTileADay(t *testing.T) {
+	for _, tt := range []struct {
+		in   string
+		want string // a fragment the message has to carry
+	}{
+		{"week", "hour, day"},
+		{"", "hour, day"},
+		{"h", "hour, day"},
+		{"4x", "hour, day"},
+		{"4hours", "hour, day"},
+		// Uniform slots are the axis's whole premise: 5h would restart at
+		// every midnight and put buckets between the slots.
+		{"5h", "divide the day"},
+		{"7h", "divide the day"},
+		{"48h", "divide the day"},
+		{"0h", "divide the day"},
+		{"-4h", "divide the day"},
+	} {
+		t.Run(tt.in, func(t *testing.T) {
+			got, err := ParseGranularity(tt.in)
+			if err == nil {
+				t.Fatalf("ParseGranularity(%q) = %d, want an error", tt.in, got)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error %q should mention %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// Every accepted bucket has to tile a day exactly, or the axis lattice breaks.
+func TestEveryAcceptedGranularityTilesADay(t *testing.T) {
+	for n := 1; n <= 48; n++ {
+		g := Granularity(n)
+		if got := g.valid(); got != (n <= 24 && 24%n == 0) {
+			t.Errorf("Granularity(%d).valid() = %v", n, got)
+		}
+		if !g.valid() {
+			continue
+		}
+		// Walking a full day in steps must land back on midnight having
+		// visited only whole buckets.
+		midnight := time.Date(2026, 3, 3, 0, 0, 0, 0, time.UTC)
+		var slots int
+		for at := midnight; at.Before(midnight.AddDate(0, 0, 1)); at = at.Add(g.step()) {
+			if !g.truncate(at).Equal(at) {
+				t.Errorf("%d-hour bucket: slot %s is not its own bucket start", n, at.Format("15:04"))
+			}
+			slots++
+		}
+		if slots != 24/n {
+			t.Errorf("%d-hour bucket: %d slots in a day, want %d", n, slots, 24/n)
+		}
+	}
+}
+
+// A multi-hour bucket floors to a multiple of its width, counting from
+// midnight — not to the commit's own hour.
+func TestGranularityFloorsToTheBucketBoundary(t *testing.T) {
+	for _, tt := range []struct {
+		gran Granularity
+		at   string
+		want string
+	}{
+		{GranularityHour, "14:30", "14:00"},
+		{4, "14:30", "12:00"},
+		{4, "03:59", "00:00"},
+		{4, "23:59", "20:00"},
+		{6, "13:00", "12:00"},
+		{12, "13:00", "12:00"},
+		{GranularityDay, "23:59", "00:00"},
+	} {
+		t.Run(fmt.Sprintf("%dh_%s", tt.gran, tt.at), func(t *testing.T) {
+			at, err := time.Parse("2006-01-02 15:04", "2026-03-03 "+tt.at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := tt.gran.truncate(at).Format("15:04"); got != tt.want {
+				t.Errorf("truncate(%s) = %s, want %s", tt.at, got, tt.want)
+			}
+		})
+	}
+}
+
+// The whole point of a wider bucket: commits an hour apart merge into one
+// column, and the page says so in its own words.
+func TestAMultiHourBucketMergesAndNamesItself(t *testing.T) {
+	records := commitsAt(t,
+		time.Date(2026, 3, 3, 9, 15, 0, 0, time.UTC),
+		time.Date(2026, 3, 3, 10, 40, 0, 0, time.UTC),
+		time.Date(2026, 3, 3, 13, 5, 0, 0, time.UTC),
+	)
+
+	if _, order := groupByBucket(records, 4); len(order) != 2 {
+		t.Errorf("got %d 4-hour buckets, want 2 (08:00 and 12:00)", len(order))
+	}
+	if _, order := groupByBucket(records, GranularityHour); len(order) != 3 {
+		t.Errorf("got %d hourly buckets, want 3", len(order))
+	}
+
+	got := renderGraphAt(t, records, 4)
+	for _, want := range []string{
+		"Net lines of code each 4 hours",
+		"Table view — by 4 hours",
+		"<th>Bucket start</th>",
+		"<td>2026-03-03 08:00</td>",
+		"<td>2026-03-03 12:00</td>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("page is missing %q", want)
+		}
+	}
+}
+
+// A library caller can name a bucket the flag layer would have refused.
+func TestNewGraphRejectsABucketThatDoesNotTileADay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "graph.html")
+	if _, err := NewGraph(path, GraphOptions{Granularity: 5}); err == nil {
+		t.Fatal("NewGraph() accepted a 5-hour bucket, whose columns would fall between slots")
+	} else if !strings.Contains(err.Error(), "divide the day") {
+		t.Errorf("error %q should say why 5 hours is refused", err)
 	}
 }
 

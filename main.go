@@ -86,7 +86,8 @@ func parseFlags(args []string, errOut io.Writer) (config, error) {
 	fs.StringVar(&cfg.FileOut, "file-out", "loc-history.csv", "path for the file sink")
 	fs.StringVar(&fileFormat, "file-format", "csv", "file sink format: csv or ndjson")
 	fs.StringVar(&cfg.GraphOut, "graph-out", "loc-history.html", "path for the graph sink")
-	fs.StringVar(&granularity, "granularity", "hour", "graph time bucket: hour or day")
+	fs.StringVar(&granularity, "granularity", "hour",
+		"graph time bucket: hour, day, or a width in hours like 4h")
 	fs.IntVar(&cfg.Jobs, "jobs", 4, "commits processed concurrently")
 	fs.StringVar(&cfg.WorkDir, "work-dir", "/tmp",
 		"scratch root; must be a path Docker is allowed to bind-mount")
