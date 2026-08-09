@@ -6,7 +6,7 @@ life of a branch.
 For every commit on a branch, oldest to newest, `loc-history` materialises that commit's
 source folder into a scratch directory, runs `cloc` twice inside Docker — once excluding test
 files, once counting only test files — and emits one record per commit to a console table, a
-CSV/NDJSON file, or a self-contained HTML calendar heat map.
+CSV/NDJSON file, or a self-contained HTML page charting the two over time.
 
 ```console
 $ loc-history --repo=~/code/my-app --folder=src --branch=main
@@ -158,12 +158,19 @@ NDJSON emits the whole record per line, keeping the file/comment/blank counts th
 projection drops.
 
 **`graph`** — one self-contained HTML file at `--graph-out`. Inlined CSS and SVG, no scripts,
-no external URLs, so it opens straight from disk and survives being emailed. It is a
-GitHub-style calendar heat map where each cell is the **summed delta of that day's commits**.
-Because the delta is signed, the scale is diverging — blue for growth, red for net deletion —
-and intensity steps sit at quartiles of daily magnitude, so one enormous initial commit does
-not flatten the rest of the history. Every cell carries a tooltip, and a `<details>` table
-lists every commit, so nothing is reachable only by hovering.
+no external URLs, so it opens straight from disk and survives being emailed.
+
+Two column charts, one for product files and one for test files. Time runs along the x axis,
+one column per calendar day; the column is the **summed net change of that day's commits**,
+drawn up from a zero line where the tree grew and down where it shrank, blue for added and red
+for removed. Both charts sit on **one shared y scale**, so a +2000 product day is visibly ten
+times a +200 test day and the two are read against each other rather than side by side.
+
+Those values are **net counts differenced from the cloc snapshot of each commit, not diff line
+counts**: a commit that rewrites 100 lines in place nets to zero and draws no column. Every
+commit-bearing day carries a tooltip on hover and on keyboard focus, and two `<details>` tables
+— one by day, one by commit — list every charted number, so nothing is reachable only by
+hovering.
 
 ---
 
@@ -181,7 +188,7 @@ loc-history [flags]
   --out string           sinks, comma-separated: console, file, graph (default "console")
   --file-out string      path for the file sink (default "loc-history.csv")
   --file-format string   csv | ndjson (default "csv")
-  --graph-out string     path for the heat map sink (default "loc-history.html")
+  --graph-out string     path for the graph sink (default "loc-history.html")
 
   --jobs int             commits processed concurrently (default 4)
   --work-dir string      scratch root; must be a path Docker may bind-mount (default "/tmp")
@@ -240,7 +247,7 @@ degrades to a recount rather than to a wrong number.
 ## Development
 
 ```bash
-go test ./...          # 131 test functions
+go test ./...          # 137 test functions
 go test -race ./...    # also clean
 go test -short ./...   # skips the container tests
 ```

@@ -23,8 +23,9 @@ For every commit on a branch, oldest to newest, it:
 3. Emits one record (commit, timestamp, product LOC, test LOC, total, signed delta against
    the previous commit) to a pluggable sink.
 
-Three sinks ship: a console table, a file (CSV/NDJSON), and a self-contained HTML calendar
-heat map. Counted commits are cached, so re-running after a few new commits is instant.
+Three sinks ship: a console table, a file (CSV/NDJSON), and a self-contained HTML page that
+charts daily net change for product and test code. Counted commits are cached, so re-running
+after a few new commits is instant.
 
 The tool is **general-purpose** — it defaults to the current directory and runs against any
 repository via `--repo`.
@@ -54,15 +55,24 @@ These were explicitly chosen from presented alternatives. **Do not re-open them.
 | 1 | Language | **Go** (separate module) | Node ESM script; Python 3 |
 | 2 | Sink interface shape | **Push-based `Writer`**: `Write(Record) error` + `Close() error` | Pull-based consumer of an iterator; the name `Reader` |
 | 3 | What the two cloc queries measure | **Product vs. test code** — the same regex used both ways, so the two are exact complements | Source vs. generated/vendored; two independent regexes |
-| 4 | Heat map output | **Self-contained HTML file** (inlined CSS/SVG, no network) | ANSI blocks in the terminal; a standalone `.svg` |
+| 4 | Graph output | **Self-contained HTML file** (inlined CSS/SVG, no network) | ANSI blocks in the terminal; a standalone `.svg` |
 | 5 | Go installation | Official tarball to `/usr/local/go` | Homebrew; a version manager |
 | 6 | Test corpus | This repository and synthetic fixtures | A neighbouring `timeseries-visualizer` project, later ruled out of scope |
+| 7 | Graph form | **Two diverging column charts over time** — product and test, one column per day, one shared y scale | A GitHub-contributions calendar heat map (shipped first, superseded); two-sided add/remove bars; a dual axis |
 
 On decision 2: the original request said output is "written to a `Reader` interface", but all
 three implementations are writers. The user resolved the contradiction in favour of the
 conventional name.
 
 Decision 3 survived contact with reality; only the flag name in the plan was wrong (§5).
+
+On decision 7: the first shipped graph *was* the calendar heat map — ISO-week columns,
+weekday rows, one tinted cell per day. It answered "how often" well and "how much" badly: a
+quartile-bucketed tint cannot show that one day is ten times another, and it merged product
+and test into a single number. The user asked for the GitHub *code-frequency* shape instead.
+The heat map is gone, not deprecated. Where the numbers come from did **not** change — still
+the cloc snapshots, still bucketed by calendar day — so nothing upstream of `internal/writer`
+moved.
 
 ---
 
@@ -202,13 +212,13 @@ loc-history/
       writer.go             Writer interface + MultiWriter
       console.go            streaming table
       file.go               csv / ndjson
-      graph.go              calendar heat map view model
+      graph.go              chart geometry + view model
       graph_template.go     the self-contained page
       testdata/golden.html
     gittest/                throwaway repositories for tests
 ```
 
-**131 test functions.** Everything except the `cloc` container tests runs without Docker and
+**137 test functions.** Everything except the `cloc` container tests runs without Docker and
 without a network; the container tests skip themselves under `-short` or a stopped daemon.
 
 ---
@@ -250,8 +260,8 @@ func (r *Record) Finalize(prevTotal int)
 imports a producer for a type alone. `gitlog.Commit` is an alias.
 
 `Delta` is what the original request called "lines added". **It is signed.** A refactor that
-deletes more than it adds yields a negative value, and the heat map renders that honestly
-rather than clamping to zero.
+deletes more than it adds yields a negative value, and the graph renders that honestly rather
+than clamping to zero.
 
 `Finalize` takes the previous total explicitly because only the emitter knows commit order.
 
@@ -295,28 +305,54 @@ counts the CSV projection drops.
 One self-contained HTML file: inlined CSS and SVG, no `<script>`, `<link>`, `<img>` or
 external URL anywhere, so it opens straight from disk. A test asserts exactly that.
 
-A GitHub-style calendar heat map — columns are ISO weeks, rows are weekdays, one cell per
-calendar day, **cell value is the summed `Delta` of every commit that day**.
+Two **diverging column charts** as small multiples — *Product files* above, *Test files*
+below. The x axis is a linear run of calendar days from the first commit's day to the last,
+inclusive, so quiet days take up room. One column per day, its value the **summed per-category
+snapshot delta of every commit that day**, drawn up from a zero line where the tree grew and
+down where it shrank.
 
-Because that value is signed the scale is **diverging**: blue for growth, red for deletion, a
-neutral gray midpoint, four steps per arm. A day with no commits is a fourth, distinct colour
-from a day that netted zero. Intensity steps sit at the **quartiles of daily magnitude**, not
-linear bands — one enormous initial commit would otherwise flatten the whole rest of the
-history to the palest step.
+Per record, in the order the sink receives them:
+
+```
+productΔ = r.Product.Code − prevProduct
+testΔ    = r.Test.Code    − prevTest
+```
+
+with `prevProduct`/`prevTest` starting at 0 — including across `Skipped` commits, whose counts
+are 0 — mirroring `Finalize`'s `prevTotal` convention. That makes `productΔ + testΔ == Delta`
+hold for every record, so the charts and the commit table can never disagree. A test asserts
+it. **No `git diff --numstat` is involved**: these are net counts differenced from tree
+snapshots, so a commit that rewrites 100 lines in place nets to zero and draws no column. The
+figure caption says so.
+
+The **y scale is shared by both charts and symmetric about zero**: `yMax` is the largest daily
+magnitude across *both* series, rounded up to 1/2/5 × 10ⁿ with a floor of 1 so a flat history
+cannot divide by zero. Same lines-per-pixel in both charts, and a −500 day exactly as tall as
+a +500 day. Never a dual axis.
+
+The viewBox is fixed (952 × 210) and the SVG is sized at 100% width, so the whole history
+always fits the card — no horizontal scrolling, and the two charts stay column-aligned by
+construction. Columns are capped at 24 units and centred in their slot, with a 2-unit surface
+gap while the pitch allows it and no gap below that, so a dense history reads as a continuous
+silhouette. The 4px rounded data-end from the `dataviz` skill is deliberately dropped: columns
+routinely fall under 4 units wide, and a corner radius wider than the bar distorts the value.
 
 Colours are CSS custom properties rather than SVG `fill` attributes, which is what lets one
 document serve both colour schemes: `prefers-color-scheme` plus a `data-theme` override, with
-dark mode a *selected* set of steps from the same ramps rather than an inversion.
+dark mode a *selected* set of steps rather than an inversion.
 
-Every cell carries a `<title>` with its date, net change, commit count and subjects; a
-`<details>` table view lists every commit, so no value is reachable only by hovering.
+One transparent full-height hit target per commit-bearing day carries a `<title>` with the
+date, both categories' deltas, the commit count and the subjects — the same text on both
+charts, so either gives the whole day. Hover and keyboard focus surface it alike. Two
+`<details>` table views, one by day and one by commit, list every charted number, so no value
+is reachable only by hovering.
 
-> The palette comes from the `dataviz` skill's reference instance. Its documented blue
-> sequential ramp is the growth arm; it documents no red ramp, so the deletion arm is
-> **computed** — each step takes its blue counterpart's OKLCH lightness at the documented
-> red's hue, chroma scaled by the ratio between the two documented poles. The gate for a
-> diverging ramp is lightness monotonicity (running the *categorical* validator on a ramp
-> fails by design); verified `|L − L_mid|` rises monotonically along each arm in both modes.
+> The palette is four roles taken unchanged from the `dataviz` skill's reference instance: the
+> documented diverging pair blue ↔ red for added ↔ removed (categorical slots 1 and 8), plus
+> the documented gridline and baseline greys. Colour is redundant with bar direction, which is
+> the correct double encoding for a diverging scale. Validated as a two-slot palette against
+> both surfaces with the skill's own script — every check passes, worst-pair CVD ΔE 21.6 light
+> / 19.2 dark. The old eight-step ramps are gone, along with the computed red arm they needed.
 
 ---
 
@@ -516,7 +552,7 @@ clean afterwards.
 | Docker daemon stopped | One actionable line: `docker daemon unavailable: start Docker Desktop and try again: …` |
 | `--folder=nope` | Every commit skipped; structurally valid output with dashes, exit 0 |
 | `--work-dir` on `/var/folders` | Counted correctly — the assumed macOS mount trap did not reproduce on Docker Desktop 29.6.2. The preflight canary stays as insurance. |
-| Heat map in both colour schemes | Rendered and inspected; dark and light both correct, ramp direction inverts per surface |
+| Graph in both colour schemes | Rendered and inspected; dark and light both correct, each a selected step rather than an inversion |
 
 ---
 
