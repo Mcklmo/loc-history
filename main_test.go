@@ -3,12 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/csv"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/mcklmo/loc-history/internal/cloc"
 	"github.com/mcklmo/loc-history/internal/gittest"
+	"github.com/mcklmo/loc-history/internal/report"
+	"github.com/mcklmo/loc-history/internal/writer"
 )
 
 func TestParseFlagsDefaults(t *testing.T) {
@@ -293,5 +298,103 @@ func TestNoCacheForcesARecount(t *testing.T) {
 	// Preflight plus product and test for the single commit.
 	if runner.Calls() != 3 {
 		t.Errorf("made %d calls with --no-cache, want 3", runner.Calls())
+	}
+}
+
+func TestParseFlagsFileSinkDefaults(t *testing.T) {
+	cfg, err := parseFlags(nil, new(bytes.Buffer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.FileOut != "loc-history.csv" {
+		t.Errorf("file-out = %q", cfg.FileOut)
+	}
+	if cfg.FileFormat != writer.FormatCSV {
+		t.Errorf("file-format = %v, want csv", cfg.FileFormat)
+	}
+}
+
+// A bad format must be caught before a multi-minute walk, not after it.
+func TestParseFlagsRejectsAnUnknownFileFormat(t *testing.T) {
+	_, err := parseFlags([]string{"--file-format=yaml"}, new(bytes.Buffer))
+	if err == nil {
+		t.Fatal("parseFlags() accepted --file-format=yaml")
+	}
+	if !strings.Contains(err.Error(), "file-format") {
+		t.Errorf("error %q should name the flag", err)
+	}
+}
+
+// --out=console,file composes: one walk, two artifacts.
+func TestExecuteComposesConsoleAndFileSinks(t *testing.T) {
+	r := gittest.New(t)
+	r.Write("src/app.js", "const a = 1\n")
+	r.Commit("feat: first")
+	r.Write("src/app.js", "const a = 1\nconst b = 2\n")
+	r.Commit("feat: second")
+
+	out := filepath.Join(t.TempDir(), "history.csv")
+	cfg, err := parseFlags([]string{
+		"--repo=" + r.Dir, "--work-dir=" + t.TempDir(), "--cache-dir=" + t.TempDir(),
+		"--out=console,file", "--file-out=" + out,
+	}, new(bytes.Buffer))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := execute(context.Background(), cfg, &cloc.FakeRunner{}, &stdout, &stderr); err != nil {
+		t.Fatalf("execute() error = %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "feat: second") {
+		t.Errorf("console sink produced nothing useful:\n%s", stdout.String())
+	}
+
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("file sink wrote nothing: %v", err)
+	}
+	rows, err := csv.NewReader(bytes.NewReader(b)).ReadAll()
+	if err != nil {
+		t.Fatalf("file sink output is not valid CSV: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Errorf("got %d CSV rows, want a header plus 2 commits", len(rows))
+	}
+}
+
+func TestExecuteWritesNDJSON(t *testing.T) {
+	r := gittest.New(t)
+	r.Write("src/app.js", "const a = 1\n")
+	r.Commit("feat: first")
+
+	out := filepath.Join(t.TempDir(), "history.ndjson")
+	cfg, err := parseFlags([]string{
+		"--repo=" + r.Dir, "--work-dir=" + t.TempDir(), "--cache-dir=" + t.TempDir(),
+		"--out=file", "--file-out=" + out, "--file-format=ndjson",
+	}, new(bytes.Buffer))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := execute(context.Background(), cfg, &cloc.FakeRunner{}, &stdout, &stderr); err != nil {
+		t.Fatalf("execute() error = %v", err)
+	}
+
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec report.Record
+	if err := json.Unmarshal(bytes.TrimSpace(b), &rec); err != nil {
+		t.Fatalf("output is not NDJSON: %v", err)
+	}
+	if rec.Subject != "feat: first" {
+		t.Errorf("subject = %q", rec.Subject)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("--out=file should not print a table:\n%s", stdout.String())
 	}
 }

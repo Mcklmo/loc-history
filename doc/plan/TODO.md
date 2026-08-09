@@ -30,7 +30,9 @@ then a commit.
       tag, sharded, atomic renames, corrupt entries degrade to a recount. Consulted before
       extraction, so a hit skips the tar too. 12 cache tests + 5 pipeline tests + 3 CLI tests.
       Measured on this repo: 1.885s cold, 0s warm, byte-identical output.
-- [ ] 8. `FileWriter`
+- [x] **8. `FileWriter`** — csv (via `encoding/csv`, so hostile subjects quote correctly) and
+      ndjson (whole `Record`, keeping files/comment/blank the CSV projection drops). Buffered,
+      flushed on `Close`; parent directories created. 12 tests + 4 CLI tests.
 - [ ] 9. `GraphWriter`
 - [ ] 10. End-to-end verification
 
@@ -67,3 +69,6 @@ Verified against the real image, not assumed:
   reports 935 product / 1392 test / 2327 total. Independently confirmed by extracting the
   tree by hand and running the three cloc queries directly: 935 + 1392 = 2327.
 - **Location.** Standalone module at the repo root, not `tools/loc-history/` inside a host repo.
+- **CSV has a tenth column, `skipped`.** The nine specified columns cannot distinguish "the
+  folder was absent" from "the folder was present and empty" — both are zero. NDJSON carries
+  it already, since it emits the whole `Record`.

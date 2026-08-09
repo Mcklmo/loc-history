@@ -51,7 +51,9 @@ type config struct {
 	Folder    string
 	TestRegex string
 
-	Out []string
+	Out        []string
+	FileOut    string
+	FileFormat writer.Format
 
 	Jobs        int
 	WorkDir     string
@@ -65,11 +67,11 @@ type config struct {
 
 // knownSinks is the set --out accepts. Adding a sink is additive: implement
 // writer.Writer, then name it here.
-var knownSinks = map[string]bool{"console": true}
+var knownSinks = map[string]bool{"console": true, "file": true}
 
 func parseFlags(args []string, errOut io.Writer) (config, error) {
 	var cfg config
-	var out string
+	var out, fileFormat string
 
 	fs := flag.NewFlagSet("loc-history", flag.ContinueOnError)
 	fs.SetOutput(errOut)
@@ -78,7 +80,9 @@ func parseFlags(args []string, errOut io.Writer) (config, error) {
 	fs.StringVar(&cfg.Folder, "folder", "src", "source folder to count")
 	fs.StringVar(&cfg.TestRegex, "test-regex", cloc.DefaultTestRegex,
 		"regex splitting test files from product files, matched against the basename")
-	fs.StringVar(&out, "out", "console", "sinks, comma-separated: console")
+	fs.StringVar(&out, "out", "console", "sinks, comma-separated: console, file")
+	fs.StringVar(&cfg.FileOut, "file-out", "loc-history.csv", "path for the file sink")
+	fs.StringVar(&fileFormat, "file-format", "csv", "file sink format: csv or ndjson")
 	fs.IntVar(&cfg.Jobs, "jobs", 4, "commits processed concurrently")
 	fs.StringVar(&cfg.WorkDir, "work-dir", "/tmp",
 		"scratch root; must be a path Docker is allowed to bind-mount")
@@ -117,6 +121,12 @@ func parseFlags(args []string, errOut io.Writer) (config, error) {
 		return config{}, fmt.Errorf("-test-regex is not a valid expression: %w", err)
 	}
 
+	format, err := ParseFileFormat(fileFormat)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.FileFormat = format
+
 	return cfg, nil
 }
 
@@ -128,6 +138,16 @@ func defaultCacheDir() string {
 		return filepath.Join(".", ".loc-history-cache")
 	}
 	return filepath.Join(base, "loc-history")
+}
+
+// ParseFileFormat is exported for the flag layer to validate before any work
+// starts, rather than failing after a full walk.
+func ParseFileFormat(s string) (writer.Format, error) {
+	f, err := writer.ParseFormat(s)
+	if err != nil {
+		return 0, fmt.Errorf("-file-format: %w", err)
+	}
+	return f, nil
 }
 
 func sinkNames() []string {
@@ -172,6 +192,15 @@ func execute(ctx context.Context, cfg config, runner cloc.Runner, stdout, stderr
 		switch name {
 		case "console":
 			sinks = append(sinks, writer.NewConsole(stdout))
+		case "file":
+			f, err := writer.NewFile(cfg.FileOut, cfg.FileFormat)
+			if err != nil {
+				// Close whatever is already open; pipeline.Run never got the
+				// chance to take ownership of them.
+				writer.MultiWriter(sinks...).Close()
+				return err
+			}
+			sinks = append(sinks, f)
 		}
 	}
 
