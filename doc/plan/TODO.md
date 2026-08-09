@@ -8,7 +8,9 @@ then a commit.
 - [x] **0. Toolchain** — go1.26.5 installed from the official go.dev tarball to `/usr/local/go`
       (not brew, not a version manager); `PATH` exported in `~/.zshrc`. Git repo initialised,
       module `github.com/mcklmo/loc-history`.
-- [ ] 1. `report` + `writer` — `Count`, `Record`, `Writer`, `ConsoleWriter`, `MultiWriter`
+- [x] **1. `report` + `writer`** — `Commit`, `Count`, `Record`, signed `Delta`, `Writer`,
+      `MultiWriter` (fans out past a failing sink, joins Close errors), streaming `ConsoleWriter`
+      with dash cells for skipped commits. 15 tests.
 - [ ] 2. `gitlog` — commit enumeration
 - [ ] 3. `tree` — `git archive` extraction, absent-folder path
 - [ ] 4. `cloc` — `Runner`, `parse.go`, `DockerRunner`, `FakeRunner`
