@@ -2,6 +2,7 @@ package writer
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -289,10 +290,10 @@ func (g *Graph) build() pageData {
 	noun := gran.Noun()
 	p.Charts = []chart{
 		buildChart("Product files",
-			fmt.Sprintf("Area chart of the running total of product lines of code at the end of each %s. The same values are listed in the table below.", noun),
+			fmt.Sprintf("Line chart of the running total of product lines of code, plotted at the end of each %s that carries a commit and joined by a smooth curve. The same values are listed in the table below.", noun),
 			buckets, ax, func(b *bucket.Bucket) int { return b.Product.Code }),
 		buildChart("Test files",
-			fmt.Sprintf("Area chart of the running total of test lines of code at the end of each %s, on the same scale as the product chart. The same values are listed in the table below.", noun),
+			fmt.Sprintf("Line chart of the running total of test lines of code, plotted at the end of each %s that carries a commit and joined by a smooth curve, on the same scale as the product chart. The same values are listed in the table below.", noun),
 			buckets, ax, func(b *bucket.Bucket) int { return b.Test.Code }),
 	}
 
@@ -372,7 +373,7 @@ func buildChart(label, aria string, buckets map[string]*bucket.Bucket, ax axis, 
 		})
 	}
 
-	c.Area = buildArea(buckets, ax, pick)
+	c.Area = buildCurve(buckets, ax, pick)
 	c.XLabels = buildAxisLabels(ax)
 	return c
 }
@@ -383,43 +384,114 @@ func yFor(v, yMax int) float64 {
 	return baseY - float64(v)/float64(yMax)*float64(plotHeight)
 }
 
-// buildArea traces the running total as a step: a bucket's total holds until the
-// next commit-bearing bucket, so a quiet stretch reads as flat rather than as
-// absent. Equal-valued runs collapse into a single segment, so the path is sized
-// by the commits rather than by the span — an hourly year is 8,760 slots but
-// only as many steps as there are commit-bearing buckets.
+// pt is one on-curve anchor: where a commit-bearing bucket's slot sits, and the
+// level the tree stood at when it closed.
+type pt struct{ x, y float64 }
+
+// buildCurve traces the running total as a smooth line through every
+// commit-bearing bucket. Only those buckets are anchors; a quiet slot is not a
+// measurement, so the curve travels over it and a long quiet stretch reads as a
+// gradual climb towards the next commit rather than as a staircase. What the
+// curve draws between two anchors is interpolation, not observation.
+//
+// An anchor is kept even where its total equals its predecessor's. That gives
+// the segment a zero secant, which the monotone filter turns into zero tangents
+// at both ends — a genuinely flat stretch. Dropping it would let the earlier
+// tangent aim at the next commit and bow the curve upwards across a stretch
+// where nothing changed.
+//
+// The path is still sized by the commits rather than by the span: an hourly
+// year is 8,760 slots but only as many anchors as there are commit-bearing
+// buckets.
 //
 // A Skipped bucket carries zero counts because the folder was absent, so the
-// area genuinely drops to the floor there. That is what the snapshot says.
-func buildArea(buckets map[string]*bucket.Bucket, ax axis, pick func(*bucket.Bucket) int) area {
+// curve genuinely falls to the floor there. That is what the snapshot says.
+func buildCurve(buckets map[string]*bucket.Bucket, ax axis, pick func(*bucket.Bucket) int) area {
 	at := func(x, y float64) string { return fnum(x) + "," + fnum(y) }
 
-	pts := make([]string, 0, 2*len(buckets)+2)
-	running, prevY, first := 0, 0.0, true
+	ps := make([]pt, 0, len(buckets))
 	for i := range ax.span {
-		// A quiet slot holds the level it was left at.
-		v := running
-		if b := buckets[bucketKey(ax.at(i))]; b != nil {
-			v = pick(b)
+		b := buckets[bucketKey(ax.at(i))]
+		if b == nil {
+			continue
 		}
-		y := yFor(v, ax.yMax)
-		x := gutterLeft + float64(i)*ax.pitch
-		switch {
-		case first:
-			pts = append(pts, at(x, y))
-			first = false
-		case v != running:
-			pts = append(pts, at(x, prevY), at(x, y)) // hold across, then step
-		}
-		running, prevY = v, y
+		ps = append(ps, pt{gutterLeft + float64(i)*ax.pitch, yFor(pick(b), ax.yMax)})
 	}
-	pts = append(pts, at(plotRight, prevY)) // hold to the right edge
+	if len(ps) == 0 {
+		// build returns early on an empty history, so this is unreachable —
+		// but the emit below indexes, and an empty path is the honest answer.
+		return area{}
+	}
 
-	top := strings.Join(pts, "L")
+	// Distinct slots at a positive pitch, so x strictly increases and no
+	// segment can have zero width.
+	var segs strings.Builder
+	if len(ps) > 1 {
+		m := monotoneTangents(ps)
+		for i, p := range ps[:len(ps)-1] {
+			next := ps[i+1]
+			h := next.x - p.x
+			segs.WriteString("C" + at(p.x+h/3, p.y+m[i]*h/3) +
+				" " + at(next.x-h/3, next.y-m[i+1]*h/3) +
+				" " + at(next.x, next.y))
+		}
+	}
+
+	// The last anchor sits at plotRight-pitch, and the level it stands at is
+	// still standing at the end of the axis, so the line runs straight out.
+	last := ps[len(ps)-1]
+	top := at(ps[0].x, ps[0].y) + segs.String() + "L" + at(plotRight, last.y)
 	return area{
 		Line: "M" + top,
 		Fill: "M" + at(gutterLeft, baseY) + "L" + top + "L" + at(plotRight, baseY) + "Z",
 	}
+}
+
+// monotoneTangents fits one Fritsch–Carlson tangent per anchor, given anchors
+// whose x strictly increases. Cubic Hermite segments built on these tangents
+// pass through every anchor and provably cannot overshoot it: the filter below
+// confines each segment's control points to the box between its two endpoints,
+// so a rising run never draws a dip, a peak is never exceeded, and the curve
+// cannot leave the plot. Working in inverted SVG y is fine — it is sign
+// agnostic.
+func monotoneTangents(ps []pt) []float64 {
+	n := len(ps)
+
+	// Secants: the straight-line slope of each segment.
+	d := make([]float64, n-1)
+	for i, p := range ps[:n-1] {
+		d[i] = (ps[i+1].y - p.y) / (ps[i+1].x - p.x)
+	}
+
+	// A first guess: average the two secants meeting at each interior anchor.
+	m := make([]float64, n)
+	m[0], m[n-1] = d[0], d[n-2]
+	for i := 1; i < n-1; i++ {
+		m[i] = (d[i-1] + d[i]) / 2
+	}
+
+	for i, di := range d {
+		if di == 0 {
+			// The segment is flat, so it must leave flat and arrive flat.
+			m[i], m[i+1] = 0, 0
+			continue
+		}
+		// Tangents measured in units of the secant. Negative means the tangent
+		// leans against the segment's direction; past a radius of 3 the cubic
+		// bulges outside its endpoints.
+		a, b := m[i]/di, m[i+1]/di
+		if a < 0 {
+			m[i], a = 0, 0
+		}
+		if b < 0 {
+			m[i+1], b = 0, 0
+		}
+		if r := a*a + b*b; r > 9 {
+			t := 3 / math.Sqrt(r)
+			m[i], m[i+1] = t*a*di, t*b*di
+		}
+	}
+	return m
 }
 
 // slotSpan centres something w wide on the slot at slotX, keeping it inside the

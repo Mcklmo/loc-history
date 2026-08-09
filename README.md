@@ -171,8 +171,12 @@ no external URLs, so it opens straight from disk and survives being emailed.
 
 Two area charts, one for product files and one for test files. Time runs along the x axis, one
 slot per `--granularity` bucket; the series is the **running total** — the lines of code
-standing at the end of each bucket. It is drawn as a step, holding flat across quiet stretches
-and stepping where a commit moved it, so a repo that only grows shows a curve that only rises.
+standing at the end of each bucket. It is drawn as a **smooth line through every commit-bearing
+bucket**, so a repo that only grows shows a curve that only rises. Only those buckets are
+measured: between two of them the curve is interpolation, and a quiet stretch reads as a
+gradual climb towards the next commit rather than as a claim about the days it crosses. The
+interpolation is monotone cubic, so the curve passes through every point and can never bulge
+past a peak or dip below the point before it.
 Both charts sit on **one shared y scale** standing on zero, so a 2,000-line product tree is
 visibly ten times a 200-line test tree and the two are read against each other rather than side
 by side.

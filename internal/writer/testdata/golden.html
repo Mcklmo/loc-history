@@ -138,21 +138,22 @@ td.sha { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var
 
 <section class="card">
   <p class="figure-note">Total lines of code standing at the end of each hour — the
-  area steps where commits landed and holds flat across quiet stretches, so a history that only
-  grows only rises. Both charts share one scale, so the height of one is directly comparable
-  with the height of the other. These are counts taken from a cloc snapshot of each commit, not
-  diff line counts: a commit that rewrites 100 lines in place leaves the total where it was.</p>
+  curve is measured only where a commit landed and is interpolated in between, so a quiet
+  stretch reads as a gradual climb towards the next commit rather than as a fact about the days
+  it crosses. Both charts share one scale, so the height of one is directly comparable with the
+  height of the other. These are counts taken from a cloc snapshot of each commit, not diff line
+  counts: a commit that rewrites 100 lines in place leaves the total where it was.</p>
   <figure>
     <figcaption>Product files</figcaption>
-    <svg viewBox="0 0 952 214" role="img" aria-label="Area chart of the running total of product lines of code at the end of each hour. The same values are listed in the table below.">
+    <svg viewBox="0 0 952 214" role="img" aria-label="Line chart of the running total of product lines of code, plotted at the end of each hour that carries a commit and joined by a smooth curve. The same values are listed in the table below.">
       <line class="grid" x1="46" x2="944" y1="10.00" y2="10.00"></line>
       <text class="tick" x="38" y="13.00">2,000</text>
       <line class="grid" x1="46" x2="944" y1="101.00" y2="101.00"></line>
       <text class="tick" x="38" y="104.00">1,000</text>
       <line class="zero" x1="46" x2="944" y1="192.00" y2="192.00"></line>
       <text class="tick" x="38" y="195.00">0</text>
-      <path class="area" d="M46.00,192.00L46.00,154.51L109.95,154.51L109.95,135.58L237.86,135.58L237.86,164.70L557.62,164.70L557.62,64.60L941.34,64.60L941.34,72.79L944.00,72.79L944.00,192.00Z"></path>
-      <path class="area-line" d="M46.00,154.51L109.95,154.51L109.95,135.58L237.86,135.58L237.86,164.70L557.62,164.70L557.62,64.60L941.34,64.60L941.34,72.79L944.00,72.79"></path>
+      <path class="area" d="M46.00,192.00L46.00,154.51C67.32,148.20 88.64,135.58 109.95,135.58C152.59,135.58 195.22,164.70 237.86,164.70C301.81,164.70 365.76,164.70 429.72,164.70C472.35,164.70 514.99,64.60 557.62,64.60C685.53,64.60 813.43,70.06 941.34,72.79L944.00,72.79L944.00,192.00Z"></path>
+      <path class="area-line" d="M46.00,154.51C67.32,148.20 88.64,135.58 109.95,135.58C152.59,135.58 195.22,164.70 237.86,164.70C301.81,164.70 365.76,164.70 429.72,164.70C472.35,164.70 514.99,64.60 557.62,64.60C685.53,64.60 813.43,70.06 941.34,72.79L944.00,72.79"></path>
       <text x="46.00" y="209">3 Mar 2026</text>
       <text x="136.60" y="209">5 Mar</text>
       <text x="200.55" y="209">6 Mar</text>
@@ -186,15 +187,15 @@ fix: trim dead code</title></rect>
   </figure>
   <figure>
     <figcaption>Test files</figcaption>
-    <svg viewBox="0 0 952 214" role="img" aria-label="Area chart of the running total of test lines of code at the end of each hour, on the same scale as the product chart. The same values are listed in the table below.">
+    <svg viewBox="0 0 952 214" role="img" aria-label="Line chart of the running total of test lines of code, plotted at the end of each hour that carries a commit and joined by a smooth curve, on the same scale as the product chart. The same values are listed in the table below.">
       <line class="grid" x1="46" x2="944" y1="10.00" y2="10.00"></line>
       <text class="tick" x="38" y="13.00">2,000</text>
       <line class="grid" x1="46" x2="944" y1="101.00" y2="101.00"></line>
       <text class="tick" x="38" y="104.00">1,000</text>
       <line class="zero" x1="46" x2="944" y1="192.00" y2="192.00"></line>
       <text class="tick" x="38" y="195.00">0</text>
-      <path class="area" d="M46.00,192.00L46.00,192.00L109.95,192.00L109.95,157.42L557.62,157.42L557.62,110.10L944.00,110.10L944.00,192.00Z"></path>
-      <path class="area-line" d="M46.00,192.00L109.95,192.00L109.95,157.42L557.62,157.42L557.62,110.10L944.00,110.10"></path>
+      <path class="area" d="M46.00,192.00L46.00,192.00C67.32,180.47 88.64,157.42 109.95,157.42C152.59,157.42 195.22,157.42 237.86,157.42C301.81,157.42 365.76,157.42 429.72,157.42C472.35,157.42 514.99,110.10 557.62,110.10C685.53,110.10 813.43,110.10 941.34,110.10L944.00,110.10L944.00,192.00Z"></path>
+      <path class="area-line" d="M46.00,192.00C67.32,180.47 88.64,157.42 109.95,157.42C152.59,157.42 195.22,157.42 237.86,157.42C301.81,157.42 365.76,157.42 429.72,157.42C472.35,157.42 514.99,110.10 557.62,110.10C685.53,110.10 813.43,110.10 941.34,110.10L944.00,110.10"></path>
       <text x="46.00" y="209">3 Mar 2026</text>
       <text x="136.60" y="209">5 Mar</text>
       <text x="200.55" y="209">6 Mar</text>

@@ -59,7 +59,7 @@ These were explicitly chosen from presented alternatives. **Do not re-open them.
 | 4 | Graph output | **Self-contained HTML file** (inlined CSS/SVG, no network) | ANSI blocks in the terminal; a standalone `.svg` |
 | 5 | Go installation | Official tarball to `/usr/local/go` | Homebrew; a version manager |
 | 6 | Test corpus | This repository and synthetic fixtures | A neighbouring `timeseries-visualizer` project, later ruled out of scope |
-| 7 | Graph form | **Two step-area charts of the running total over time** — product and test, one shared y scale standing on zero | A GitHub-contributions calendar heat map (shipped first, superseded); diverging column charts of the per-bucket delta (superseded in turn); two-sided add/remove bars; a dual axis |
+| 7 | Graph form | **Two smooth-line area charts of the running total over time** — one monotone-cubic curve through every commit-bearing bucket, product and test, one shared y scale standing on zero | A GitHub-contributions calendar heat map (shipped first, superseded); diverging column charts of the per-bucket delta (superseded in turn); step areas (superseded in turn); Catmull-Rom interpolation; point markers; two-sided add/remove bars; a dual axis |
 | 8 | Graph time bucket | **`--granularity=hour` (default), `day`, or a width in hours like `4h`**, with a floored hit-target width and an adaptive x-axis unit | A wider viewBox with horizontal scrolling; month labels for `day` and a special case for `hour`; `hour:4` and `"hour 4"` spellings; accepting widths that do not divide 24 |
 
 On decision 2: the original request said output is "written to a `Reader` interface", but all
@@ -79,9 +79,22 @@ That code-frequency shape was superseded in turn. Charting each bucket's *delta*
 much changed" but never "how big is this now": a history of uniformly positive deltas drew a row
 of similar columns rather than a curve that climbs. The user asked for the **level** instead —
 "the graph should display the total rows, not the total added rows" — so the two small multiples
-now plot the running total as step areas. The deltas did not become less true, only less
-charted: they still carry the tables, the CSV and the bucket tooltip. Again nothing upstream of
-`internal/writer` moved, because the running total was already on every bucket.
+plot the running total. The deltas did not become less true, only less charted: they still carry
+the tables, the CSV and the bucket tooltip. Again nothing upstream of `internal/writer` moved,
+because the running total was already on every bucket.
+
+The level was first drawn as a **step area**, and that too has been superseded. A staircase reads
+as a sequence of discrete plateaus rather than a trajectory, so the user asked for a smooth line
+travelling through each data point. Four calls came with it. Quiet gaps **slope through** rather
+than holding flat, which deliberately reverses the step's semantics: a long quiet stretch now
+reads as a gradual climb towards the next commit, and the page says outright that only the
+anchors are measured. The interpolation is **monotone cubic** (Fritsch–Carlson): it passes
+through every point and provably cannot overshoot, where Catmull-Rom bulges past a peak and dips
+below the preceding point, drawing line counts the repository never had — a test asserts the
+no-overshoot property so a prettier spline cannot be swapped in quietly. The tint **stays**, so
+each chart is still two paths sharing one point list. And there are **no point markers**: the
+transparent hit rects already make every bucket hoverable and focusable. Once more nothing
+upstream moved — this was geometry only.
 
 On decision 8: one column per calendar day broke short histories. This repository's own `main`
 at the time was 14 commits across three hours of one afternoon, which day-wide bucketing draws
@@ -90,7 +103,7 @@ consequences were chosen deliberately. Sub-unit slots are **floored, not scrolle
 the viewBox and wrapping the SVG in `overflow-x: auto` would reverse decision 7's "the whole
 history fits the card" — instead a hit target is never drawn under 4 units, so every bucket
 stays hoverable however dense the stretch. (The column floor this once also needed went with
-the columns; the step area has no minimum width to hold.) And
+the columns; a curve through the anchors has no minimum width to hold.) And
 the x-axis unit **adapts for both granularities** rather than special-casing `hour`, which does
 change the daily rendering: a fortnight now carries day labels instead of one bare `Mar 2026`.
 
@@ -429,18 +442,33 @@ projection drops.
 One self-contained HTML file: inlined CSS and SVG, no `<script>`, `<link>`, `<img>` or
 external URL anywhere, so it opens straight from disk. A test asserts exactly that.
 
-Two **step-area charts** as small multiples — *Product files* above, *Test files* below. The x
-axis is a linear run of buckets from the first commit's bucket to the last, inclusive, so quiet
-stretches take up room. Each series is the **running total**: the lines of code standing at the
-end of each bucket, which is that bucket's last commit's snapshot.
+Two **smooth-line area charts** as small multiples — *Product files* above, *Test files* below.
+The x axis is a linear run of buckets from the first commit's bucket to the last, inclusive, so
+quiet stretches take up room. Each series is the **running total**: the lines of code standing
+at the end of each bucket, which is that bucket's last commit's snapshot.
 
-It is drawn as a **step** — the level holds flat across a quiet stretch and steps where a commit
-moved it — so a history of positive deltas *rises* rather than reading as a row of similar
-columns, which is what the chart is for. Equal-valued runs collapse into a single segment, so
-the path is sized by the commits rather than by the span: an hourly year is 8,760 slots but only
-as many steps as there are commit-bearing buckets. Each chart is two `<path>`s sharing one point
-list — a tinted fill closed down to the baseline, and the top edge alone, so the series stays
-crisp where the fill is only a tint.
+It is drawn as a **curve through one anchor per commit-bearing bucket**, so a history of
+positive deltas *rises* rather than reading as a row of similar columns, which is what the chart
+is for. A quiet slot is not an anchor: the curve travels over it, so a quiet stretch reads as a
+gradual climb towards the next commit. The path is therefore sized by the commits rather than by
+the span — an hourly year is 8,760 slots but only as many anchors as there are commit-bearing
+buckets. Each chart is two `<path>`s sharing one point list — a tinted fill closed down to the
+baseline, and the top edge alone, so the series stays crisp where the fill is only a tint.
+
+The segments are **monotone cubic Hermite** (Fritsch–Carlson, `monotoneTangents`): average the
+two secants meeting at each interior anchor, then clamp the pair on each segment to a radius of
+3 secants and zero both ends of a flat one. That clamp confines a segment's Bézier control
+points to the box between its own two endpoints, which is the whole guarantee — the curve passes
+through every anchor, cannot bulge past a peak, cannot draw a dip in a rising run, and cannot
+leave `0..yMax`. Working in inverted SVG *y* is fine; the filter is sign-agnostic.
+
+Anchors are kept even where a bucket's total equals its predecessor's — the one place the curve
+is *less* coalesced than the step was. That repeated value gives the segment a zero secant,
+which the filter turns into zero tangents at both ends, holding the stretch genuinely flat.
+Dropping it would let the earlier tangent aim at the next commit and bow the curve upwards
+across a stretch where nothing changed. The last anchor sits at `plotRight - pitch`, and the
+level it stands at is still standing at the end of the axis, so the path finishes with a
+straight `L` out to the right edge rather than a curve.
 
 The graph **accumulates nothing**: `Bucket.Product`, `Bucket.Test` and `Bucket.TotalCode` are
 already the end-of-bucket snapshot, so the change was geometry only. A `Skipped` bucket's counts

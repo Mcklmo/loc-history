@@ -149,10 +149,11 @@ td.sha { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var
 
 <section class="card">
   <p class="figure-note">Total lines of code standing at the end of each {{.BucketNoun}} — the
-  area steps where commits landed and holds flat across quiet stretches, so a history that only
-  grows only rises. Both charts share one scale, so the height of one is directly comparable
-  with the height of the other. These are counts taken from a cloc snapshot of each commit, not
-  diff line counts: a commit that rewrites 100 lines in place leaves the total where it was.</p>
+  curve is measured only where a commit landed and is interpolated in between, so a quiet
+  stretch reads as a gradual climb towards the next commit rather than as a fact about the days
+  it crosses. Both charts share one scale, so the height of one is directly comparable with the
+  height of the other. These are counts taken from a cloc snapshot of each commit, not diff line
+  counts: a commit that rewrites 100 lines in place leaves the total where it was.</p>
   {{range .Charts}}<figure>
     <figcaption>{{.Label}}</figcaption>
     <svg viewBox="0 0 {{$.Frame.Width}} {{$.Frame.Height}}" role="img" aria-label="{{.AriaLabel}}">

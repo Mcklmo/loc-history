@@ -152,7 +152,7 @@ func TestGraphIsThemeAware(t *testing.T) {
 	}
 }
 
-func TestGraphBarsCarryTheirBucketAndSubjects(t *testing.T) {
+func TestGraphTooltipsCarryTheirBucketAndSubjects(t *testing.T) {
 	got := renderGraph(t, graphFixture())
 
 	if !strings.Contains(got, "feat: add the panel") {
@@ -190,27 +190,74 @@ type point struct{ x, y float64 }
 // near compares coordinates that have been through fnum's two decimals and back.
 func near(a, b float64) bool { return math.Abs(a-b) < 0.01 }
 
+// segment is one drawn piece of the top edge: where it ends up, and — for a
+// cubic — the two control points that shape it on the way. A straight L carries
+// none.
+type segment struct {
+	end   point
+	ctrl  []point
+	cubic bool
+}
+
 // areaLinePoints parses the top edge of the i-th chart back out of the page, so
-// a test can assert on the shape that was actually rendered.
+// a test can assert on the shape that was actually rendered. It returns the
+// on-curve anchors alone — the points the data actually put there.
 func areaLinePoints(t *testing.T, page string, i int) []point {
+	t.Helper()
+	var out []point
+	for _, s := range areaLineCurve(t, page, i) {
+		out = append(out, s.end)
+	}
+	if len(out) == 0 {
+		t.Fatal("area line carries no points")
+	}
+	return out
+}
+
+// areaLineCurve parses the top edge into its segments, control points and all.
+// Only a test about the shape between two anchors needs those; everything else
+// wants areaLinePoints.
+//
+// The leading M is returned as the first segment, so segment k always ends at
+// anchor k.
+func areaLineCurve(t *testing.T, page string, i int) []segment {
 	t.Helper()
 	found := regexp.MustCompile(`<path class="area-line" d="M([^"]+)"`).FindAllStringSubmatch(page, -1)
 	if len(found) <= i {
 		t.Fatalf("page carries %d area lines, want more than %d", len(found), i)
 	}
 
-	var out []point
-	for _, pair := range strings.Split(found[i][1], "L") {
-		xy := strings.Split(pair, ",")
-		if len(xy) != 2 {
-			t.Fatalf("malformed path point %q", pair)
+	// The body is "x,y" followed by any number of L and C commands; a C carries
+	// three space-separated pairs, of which the last is the anchor.
+	body := found[i][1]
+	cmds := regexp.MustCompile(`[LC]`).Split(body, -1)
+	kinds := regexp.MustCompile(`[LC]`).FindAllString(body, -1)
+
+	out := []segment{{end: parsePoint(t, cmds[0])}}
+	for j, raw := range cmds[1:] {
+		pairs := strings.Fields(raw)
+		s := segment{cubic: kinds[j] == "C"}
+		switch {
+		case s.cubic && len(pairs) == 3:
+			s.ctrl = []point{parsePoint(t, pairs[0]), parsePoint(t, pairs[1])}
+			s.end = parsePoint(t, pairs[2])
+		case !s.cubic && len(pairs) == 1:
+			s.end = parsePoint(t, pairs[0])
+		default:
+			t.Fatalf("malformed %s command %q", kinds[j], raw)
 		}
-		out = append(out, point{mustFloat(t, xy[0]), mustFloat(t, xy[1])})
-	}
-	if len(out) == 0 {
-		t.Fatal("area line carries no points")
+		out = append(out, s)
 	}
 	return out
+}
+
+func parsePoint(t *testing.T, pair string) point {
+	t.Helper()
+	xy := strings.Split(strings.TrimSpace(pair), ",")
+	if len(xy) != 2 {
+		t.Fatalf("malformed path point %q", pair)
+	}
+	return point{mustFloat(t, xy[0]), mustFloat(t, xy[1])}
 }
 
 // The user's requirement in one assertion: if every bucket adds lines, the graph
@@ -225,7 +272,7 @@ func TestGraphRisesWithAGrowingHistory(t *testing.T) {
 
 	pts := areaLinePoints(t, got, 0)
 	if len(pts) < 6 {
-		t.Fatalf("series has %d points for six growing buckets, want a step per bucket", len(pts))
+		t.Fatalf("series has %d points for six growing buckets, want a point per bucket", len(pts))
 	}
 	for i, p := range pts[1:] {
 		if p.y > pts[i].y {
@@ -238,9 +285,9 @@ func TestGraphRisesWithAGrowingHistory(t *testing.T) {
 	}
 }
 
-// A quiet stretch is not an absence of code: the total holds until something
-// actually changes it rather than falling away to the baseline.
-func TestGraphHoldsTheTotalAcrossQuietBuckets(t *testing.T) {
+// A quiet stretch is not an absence of code: the level the last commit left
+// stands until another one moves it, rather than falling away to the baseline.
+func TestGraphCarriesTheTotalAcrossQuietBuckets(t *testing.T) {
 	// The fixture stands at 300 product lines from the 6th of March to the
 	// 11th: the 7th, 8th and 10th carry no commits at all, and the 9th's is
 	// docs-only, so nothing moves the level in between.
@@ -252,33 +299,101 @@ func TestGraphHoldsTheTotalAcrossQuietBuckets(t *testing.T) {
 		bucket.GranularityDay,
 	)
 	xOf := func(day int) float64 { return gutterLeft + float64(day-3)*ax.pitch }
-	quietFrom, quietTo := xOf(6), xOf(11)
 
 	held := yFor(300, 2000)
-	pts := areaLinePoints(t, got, 0)
+	segs := areaLineCurve(t, got, 0)
 
-	// Nothing happened between the two, so the path has no vertex in there: it
-	// is one flat segment, however many quiet slots it spans.
-	for _, p := range pts {
-		if p.x > quietFrom+0.01 && p.x < quietTo-0.01 {
-			t.Errorf("the series turns at x=%.2f, inside a quiet stretch that has no commits", p.x)
+	// Only a commit puts an anchor on the axis; a day nothing happened on is
+	// not a measurement the curve may claim to have taken.
+	for _, quiet := range []int{7, 8, 10} {
+		if i := slices.IndexFunc(segs, func(s segment) bool { return near(s.end.x, xOf(quiet)) }); i >= 0 {
+			t.Errorf("the series carries an anchor on the %dth of March, a day with no commits", quiet)
 		}
 	}
 
-	// What it holds is the standing total, not the floor. The step at the far
-	// end is written as a pair — first the value carried across, then the new
-	// one — so the first point there is what the quiet stretch was worth.
-	i := slices.IndexFunc(pts, func(p point) bool { return near(p.x, quietTo) })
-	if i < 0 {
-		t.Fatalf("no point at x=%.2f, where the quiet stretch ends", quietTo)
+	// What it carries across is the standing total, not the floor: the 6th's
+	// commit and the docs-only one on the 9th are both worth 300 lines.
+	for _, day := range []int{6, 9} {
+		i := slices.IndexFunc(segs, func(s segment) bool { return near(s.end.x, xOf(day)) })
+		if i < 0 {
+			t.Fatalf("no anchor on the %dth of March, where a commit landed", day)
+		}
+		if !near(segs[i].end.y, held) {
+			t.Errorf("the %dth sits at y=%.2f, want %.2f (300 lines standing)", day, segs[i].end.y, held)
+		}
+		if near(segs[i].end.y, baseY) {
+			t.Errorf("the series fell to the baseline on the %dth; a quiet %s is not an empty tree",
+				day, bucket.GranularityDay.Noun())
+		}
 	}
-	if !near(pts[i].y, held) {
-		t.Errorf("the series arrives at the next commit at y=%.2f, want %.2f (300 lines still standing)",
-			pts[i].y, held)
+
+	// And it carries it flat. Both control points of the 6th→9th segment sit at
+	// the held level, so the docs-only commit did not bow the curve over three
+	// days on which the tree did not change size.
+	i := slices.IndexFunc(segs, func(s segment) bool { return near(s.end.x, xOf(9)) })
+	if !segs[i].cubic {
+		t.Fatalf("the 6th→9th stretch is not a curve segment; nothing to check for a bow")
 	}
-	if near(pts[i].y, baseY) {
-		t.Errorf("the series fell to the baseline across the quiet stretch; a quiet %s is not an empty tree",
-			bucket.GranularityDay.Noun())
+	for _, c := range segs[i].ctrl {
+		if !near(c.y, held) {
+			t.Errorf("the 6th→9th stretch bows to y=%.2f, want a flat %.2f — nothing moved the level",
+				c.y, held)
+		}
+	}
+}
+
+// The curve is interpolation, but it may not be invention: a spline that bulges
+// past a peak or dips below the point before it draws line counts the repository
+// never had. Monotone cubic is chosen precisely because it cannot, and this is
+// the assertion that keeps a prettier spline from being swapped in quietly.
+func TestGraphCurveNeverOvershootsItsPoints(t *testing.T) {
+	// A flat run, then a cliff, then a flat run: the shape a smoothing spline
+	// overshoots on, either side of the jump.
+	var spiky []report.Record
+	prev := 0
+	for i, code := range []int{300, 300, 9000, 9000} {
+		rec := report.Record{
+			Short:     fmt.Sprintf("s%06d", i),
+			Timestamp: time.Date(2026, 3, 3+i, 9, 0, 0, 0, time.UTC),
+			Subject:   "feat: work",
+			Product:   report.Count{Files: 1, Code: code},
+		}
+		rec.Finalize(prev)
+		prev = rec.TotalCode
+		spiky = append(spiky, rec)
+	}
+
+	for _, tt := range []struct {
+		name    string
+		records []report.Record
+	}{
+		{"fixture", graphFixture()},
+		{"a cliff between two flat runs", spiky},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := renderGraphAt(t, tt.records, bucket.GranularityDay)
+
+			for chart := range 2 {
+				segs := areaLineCurve(t, got, chart)
+				for i, s := range segs[1:] {
+					lo, hi := min(segs[i].end.y, s.end.y), max(segs[i].end.y, s.end.y)
+					for _, c := range s.ctrl {
+						if c.y < lo-0.01 || c.y > hi+0.01 {
+							t.Errorf("chart %d segment %d is steered to y=%.2f, outside the %.2f–%.2f its own endpoints span — the curve leaves the data",
+								chart, i, c.y, lo, hi)
+						}
+					}
+				}
+				// And nothing, anchor or control point, leaves the plot.
+				for _, s := range segs {
+					for _, p := range append([]point{s.end}, s.ctrl...) {
+						if p.y < gutterTop-0.01 || p.y > baseY+0.01 {
+							t.Errorf("chart %d carries y=%.2f, outside the plot %d–%d", chart, p.y, gutterTop, baseY)
+						}
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -517,10 +632,9 @@ func TestGraphPathIsSizedByCommitsNotBySpan(t *testing.T) {
 	}
 	got := renderGraphAt(t, commitsAt(t, at...), bucket.GranularityHour)
 
-	// Every commit steps the total, so each contributes a hold and a step,
-	// plus the opening point and the hold out to the right edge.
-	if n, ceiling := len(areaLinePoints(t, got, 0)), 2*40+2; n > ceiling {
-		t.Errorf("the series carries %d points for 40 commits, want at most %d — equal-valued slots are not being coalesced",
+	// One anchor per commit-bearing bucket, plus the run out to the right edge.
+	if n, ceiling := len(areaLinePoints(t, got, 0)), 40+1; n > ceiling {
+		t.Errorf("the series carries %d points for 40 commits, want at most %d — quiet slots are being drawn",
 			n, ceiling)
 	}
 }
