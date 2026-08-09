@@ -1,64 +1,12 @@
 package gitlog
 
 import (
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mcklmo/loc-history/internal/gittest"
 )
-
-// fixture builds a throwaway repo in t.TempDir() and returns its path.
-type fixture struct {
-	t   *testing.T
-	dir string
-}
-
-func newFixture(t *testing.T) *fixture {
-	t.Helper()
-	f := &fixture{t: t, dir: t.TempDir()}
-	f.git("init", "-q", "-b", "main")
-	f.git("config", "user.name", "Fixture")
-	f.git("config", "user.email", "fixture@example.com")
-	return f
-}
-
-func (f *fixture) git(args ...string) string {
-	f.t.Helper()
-	return f.gitEnv(nil, args...)
-}
-
-func (f *fixture) gitEnv(env []string, args ...string) string {
-	f.t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", f.dir}, args...)...)
-	cmd.Env = append(os.Environ(), env...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		f.t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-	}
-	return strings.TrimSpace(string(out))
-}
-
-// commit writes a file and commits it with fully pinned author and committer dates.
-func (f *fixture) commit(subject, date string) {
-	f.t.Helper()
-	f.commitDates(subject, date, date)
-}
-
-func (f *fixture) commitDates(subject, authorDate, committerDate string) {
-	f.t.Helper()
-	name := strings.NewReplacer(" ", "_", ":", "_", "/", "_").Replace(subject)
-	path := filepath.Join(f.dir, name+".txt")
-	if err := os.WriteFile(path, []byte(subject+"\n"), 0o644); err != nil {
-		f.t.Fatal(err)
-	}
-	f.git("add", "-A")
-	f.gitEnv([]string{
-		"GIT_AUTHOR_DATE=" + authorDate,
-		"GIT_COMMITTER_DATE=" + committerDate,
-	}, "commit", "-q", "-m", subject)
-}
 
 func subjects(cs []Commit) []string {
 	out := make([]string, len(cs))
@@ -81,12 +29,12 @@ func equal(a, b []string) bool {
 }
 
 func TestCommitsReturnsChronologicalOrder(t *testing.T) {
-	f := newFixture(t)
-	f.commit("first commit", "2026-08-06T21:23:18+02:00")
-	f.commit("git add init", "2026-08-06T22:13:14+02:00")
-	f.commit("slop", "2026-08-07T09:02:00+02:00")
+	r := gittest.New(t)
+	r.CommitAt("first commit", "2026-08-06T21:23:18+02:00")
+	r.CommitAt("git add init", "2026-08-06T22:13:14+02:00")
+	r.CommitAt("slop", "2026-08-07T09:02:00+02:00")
 
-	got, err := Commits(Options{Repo: f.dir, Branch: "main", FirstParent: true})
+	got, err := Commits(Options{Repo: r.Dir, Branch: "main", FirstParent: true})
 	if err != nil {
 		t.Fatalf("Commits() error = %v", err)
 	}
@@ -103,10 +51,10 @@ func TestCommitsReturnsChronologicalOrder(t *testing.T) {
 }
 
 func TestCommitsParsesEveryField(t *testing.T) {
-	f := newFixture(t)
-	f.commit("first commit", "2026-08-06T21:23:18+02:00")
+	r := gittest.New(t)
+	r.CommitAt("first commit", "2026-08-06T21:23:18+02:00")
 
-	got, err := Commits(Options{Repo: f.dir, Branch: "main", FirstParent: true})
+	got, err := Commits(Options{Repo: r.Dir, Branch: "main", FirstParent: true})
 	if err != nil {
 		t.Fatalf("Commits() error = %v", err)
 	}
@@ -132,10 +80,10 @@ func TestCommitsParsesEveryField(t *testing.T) {
 
 // Author dates run backwards after a rebase, which would scramble the time axis.
 func TestCommitsUsesCommitterDateNotAuthorDate(t *testing.T) {
-	f := newFixture(t)
-	f.commitDates("rebased work", "2020-01-01T00:00:00+00:00", "2026-08-06T21:23:18+02:00")
+	r := gittest.New(t)
+	r.CommitAtDates("rebased work", "2020-01-01T00:00:00+00:00", "2026-08-06T21:23:18+02:00")
 
-	got, err := Commits(Options{Repo: f.dir, Branch: "main", FirstParent: true})
+	got, err := Commits(Options{Repo: r.Dir, Branch: "main", FirstParent: true})
 	if err != nil {
 		t.Fatalf("Commits() error = %v", err)
 	}
@@ -148,11 +96,11 @@ func TestCommitsUsesCommitterDateNotAuthorDate(t *testing.T) {
 // %x1f is the ASCII unit separator: it cannot occur in a subject, so subjects
 // full of delimiters that would break a comma- or tab-separated format are safe.
 func TestCommitsSurvivesHostileSubjects(t *testing.T) {
-	f := newFixture(t)
+	r := gittest.New(t)
 	hostile := `feat: a,b	c "quoted" 'single' | pipe \ back`
-	f.commit(hostile, "2026-08-06T21:23:18+02:00")
+	r.CommitAt(hostile, "2026-08-06T21:23:18+02:00")
 
-	got, err := Commits(Options{Repo: f.dir, Branch: "main", FirstParent: true})
+	got, err := Commits(Options{Repo: r.Dir, Branch: "main", FirstParent: true})
 	if err != nil {
 		t.Fatalf("Commits() error = %v", err)
 	}
@@ -162,12 +110,12 @@ func TestCommitsSurvivesHostileSubjects(t *testing.T) {
 }
 
 func TestCommitsLimitKeepsMostRecentInChronologicalOrder(t *testing.T) {
-	f := newFixture(t)
+	r := gittest.New(t)
 	for _, s := range []string{"c1", "c2", "c3", "c4", "c5"} {
-		f.commit(s, "2026-08-06T21:23:18+02:00")
+		r.CommitAt(s, "2026-08-06T21:23:18+02:00")
 	}
 
-	got, err := Commits(Options{Repo: f.dir, Branch: "main", FirstParent: true, Limit: 2})
+	got, err := Commits(Options{Repo: r.Dir, Branch: "main", FirstParent: true, Limit: 2})
 	if err != nil {
 		t.Fatalf("Commits() error = %v", err)
 	}
@@ -179,12 +127,12 @@ func TestCommitsLimitKeepsMostRecentInChronologicalOrder(t *testing.T) {
 }
 
 func TestCommitsLimitZeroMeansEverything(t *testing.T) {
-	f := newFixture(t)
+	r := gittest.New(t)
 	for _, s := range []string{"c1", "c2", "c3"} {
-		f.commit(s, "2026-08-06T21:23:18+02:00")
+		r.CommitAt(s, "2026-08-06T21:23:18+02:00")
 	}
 
-	got, err := Commits(Options{Repo: f.dir, Branch: "main", FirstParent: true, Limit: 0})
+	got, err := Commits(Options{Repo: r.Dir, Branch: "main", FirstParent: true, Limit: 0})
 	if err != nil {
 		t.Fatalf("Commits() error = %v", err)
 	}
@@ -196,16 +144,16 @@ func TestCommitsLimitZeroMeansEverything(t *testing.T) {
 // --first-parent gives the trunk's size over time rather than an interleaving
 // of branch-internal states.
 func TestCommitsFirstParentHidesBranchInternalCommits(t *testing.T) {
-	f := newFixture(t)
-	f.commit("base", "2026-08-06T10:00:00+00:00")
-	f.git("checkout", "-q", "-b", "side")
-	f.commit("side work", "2026-08-06T11:00:00+00:00")
-	f.git("checkout", "-q", "main")
-	f.commit("trunk work", "2026-08-06T12:00:00+00:00")
-	f.gitEnv([]string{"GIT_COMMITTER_DATE=2026-08-06T13:00:00+00:00"},
+	r := gittest.New(t)
+	r.CommitAt("base", "2026-08-06T10:00:00+00:00")
+	r.Git("checkout", "-q", "-b", "side")
+	r.CommitAt("side work", "2026-08-06T11:00:00+00:00")
+	r.Git("checkout", "-q", "main")
+	r.CommitAt("trunk work", "2026-08-06T12:00:00+00:00")
+	r.GitEnv([]string{"GIT_COMMITTER_DATE=2026-08-06T13:00:00+00:00"},
 		"merge", "-q", "--no-ff", "-m", "merge side", "side")
 
-	withFP, err := Commits(Options{Repo: f.dir, Branch: "main", FirstParent: true})
+	withFP, err := Commits(Options{Repo: r.Dir, Branch: "main", FirstParent: true})
 	if err != nil {
 		t.Fatalf("Commits(first-parent) error = %v", err)
 	}
@@ -213,7 +161,7 @@ func TestCommitsFirstParentHidesBranchInternalCommits(t *testing.T) {
 		t.Errorf("first-parent subjects = %v, want the trunk only", subjects(withFP))
 	}
 
-	without, err := Commits(Options{Repo: f.dir, Branch: "main", FirstParent: false})
+	without, err := Commits(Options{Repo: r.Dir, Branch: "main", FirstParent: false})
 	if err != nil {
 		t.Fatalf("Commits(all) error = %v", err)
 	}
@@ -223,9 +171,9 @@ func TestCommitsFirstParentHidesBranchInternalCommits(t *testing.T) {
 }
 
 func TestCommitsDefaultsRepoToCurrentDirectory(t *testing.T) {
-	f := newFixture(t)
-	f.commit("first commit", "2026-08-06T21:23:18+02:00")
-	t.Chdir(f.dir)
+	r := gittest.New(t)
+	r.CommitAt("first commit", "2026-08-06T21:23:18+02:00")
+	t.Chdir(r.Dir)
 
 	got, err := Commits(Options{Branch: "main", FirstParent: true})
 	if err != nil {
@@ -237,10 +185,10 @@ func TestCommitsDefaultsRepoToCurrentDirectory(t *testing.T) {
 }
 
 func TestCommitsErrorsMentionTheBranch(t *testing.T) {
-	f := newFixture(t)
-	f.commit("first commit", "2026-08-06T21:23:18+02:00")
+	r := gittest.New(t)
+	r.CommitAt("first commit", "2026-08-06T21:23:18+02:00")
 
-	_, err := Commits(Options{Repo: f.dir, Branch: "nonexistent", FirstParent: true})
+	_, err := Commits(Options{Repo: r.Dir, Branch: "nonexistent", FirstParent: true})
 	if err == nil {
 		t.Fatal("Commits() on a missing branch returned no error")
 	}

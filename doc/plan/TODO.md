@@ -14,7 +14,9 @@ then a commit.
 - [x] **2. `gitlog`** — `Commits(Options)` walking `--reverse` (+ optional `--first-parent`),
       `%x1f`-delimited format, committer dates, `--limit` keeping the most recent N in
       chronological order. 10 tests against fixture repos in `t.TempDir()`.
-- [ ] 3. `tree` — `git archive` extraction, absent-folder path
+- [x] **3. `tree`** — `Extract` via `git archive` into a stdlib tar reader; absent folder is
+      `Found=false, nil`; working tree provably untouched; path-traversal and escaping-symlink
+      guards. 10 tests. Shared `internal/gittest` fixture helper extracted here.
 - [ ] 4. `cloc` — `Runner`, `parse.go`, `DockerRunner`, `FakeRunner`
 - [ ] 5. `pipeline` — worker pool + reorder buffer
 - [ ] 6. `main.go` — flags and wiring, first real run
