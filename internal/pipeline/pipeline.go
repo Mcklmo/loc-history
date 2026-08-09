@@ -29,18 +29,12 @@ type Options struct {
 	FailFast bool   // abort the whole run on the first commit that fails
 
 	// Cache serves commits that have already been counted. Nil disables it.
-	Cache Cache
+	Cache cache.Store
 	// ClocVersion keys the cache; counts from another version are not answers
 	// to the same question.
 	ClocVersion string
 
 	ErrOut io.Writer // where per-commit failures are reported; nil means stderr
-}
-
-// Cache is the subset of the cache package the pipeline needs.
-type Cache interface {
-	Get(k cache.Key) (cache.Entry, bool)
-	Put(k cache.Key, e cache.Entry) error
 }
 
 // Stats summarises what a walk did.

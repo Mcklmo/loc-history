@@ -192,7 +192,7 @@ func execute(ctx context.Context, cfg config, runner cloc.Runner, stdout, stderr
 		return err
 	}
 
-	var store pipeline.Cache
+	var store cache.Store
 	if !cfg.NoCache {
 		// A commit tree never changes, so yesterday's count is still today's
 		// answer as long as the question is identical.

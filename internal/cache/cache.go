@@ -39,16 +39,26 @@ type Entry struct {
 	Skipped bool         `json:"skipped"`
 }
 
-// Cache is a content-addressed store under a directory.
+// Store is a cache of counted commits.
+//
+// It is an interface here, beside the implementation, so that New can hand one
+// back: a method that drifts out of shape is then reported at New's return
+// rather than at some later assignment in another package.
+type Store interface {
+	Get(k Key) (Entry, bool)
+	Put(k Key, e Entry) error
+}
+
+// store is a content-addressed Store under a directory.
 //
 // It needs no lock: entries are immutable, writes are atomic renames, and two
 // processes computing the same key necessarily compute the same bytes.
-type Cache struct {
+type store struct {
 	dir string
 }
 
 // New prepares a cache rooted at dir, creating it if needed.
-func New(dir string) (*Cache, error) {
+func New(dir string) (Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create cache directory %s: %w", dir, err)
 	}
@@ -59,15 +69,15 @@ func New(dir string) (*Cache, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("cache directory %s is not a directory", dir)
 	}
-	return &Cache{dir: dir}, nil
+	return &store{dir: dir}, nil
 }
 
 // Get returns the stored entry for k, if there is a readable one.
 //
 // Any problem — missing, truncated, hand-edited — is a miss. Recounting is
 // cheap next to reporting a number that came from a damaged file.
-func (c *Cache) Get(k Key) (Entry, bool) {
-	b, err := os.ReadFile(c.pathFor(k))
+func (c *store) Get(k Key) (Entry, bool) {
+	b, err := os.ReadFile(pathFor(c.dir, k))
 	if err != nil {
 		return Entry{}, false
 	}
@@ -79,8 +89,8 @@ func (c *Cache) Get(k Key) (Entry, bool) {
 }
 
 // Put stores an entry, replacing any existing one atomically.
-func (c *Cache) Put(k Key, e Entry) error {
-	path := c.pathFor(k)
+func (c *store) Put(k Key, e Entry) error {
+	path := pathFor(c.dir, k)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create cache shard: %w", err)
 	}
@@ -113,9 +123,9 @@ func (c *Cache) Put(k Key, e Entry) error {
 
 // pathFor maps a key to its file, sharded by the first two hash characters so
 // no single directory collects every commit of every repository.
-func (c *Cache) pathFor(k Key) string {
+func pathFor(dir string, k Key) string {
 	sum := sha256.Sum256([]byte(strings.Join(
 		[]string{schema, k.SHA, k.Folder, k.TestRegex, k.ClocVersion}, "\x1f")))
 	name := hex.EncodeToString(sum[:])
-	return filepath.Join(c.dir, name[:2], name[2:]+".json")
+	return filepath.Join(dir, name[:2], name[2:]+".json")
 }

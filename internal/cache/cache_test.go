@@ -117,7 +117,7 @@ func TestEntriesSurviveANewCacheOverTheSameDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, ok := second.Get(testKey()); !ok {
-		t.Error("a fresh Cache over the same directory missed a stored entry")
+		t.Error("a fresh cache over the same directory missed a stored entry")
 	}
 }
 
@@ -133,7 +133,7 @@ func TestCorruptEntriesAreTreatedAsMisses(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	path := c.pathFor(testKey())
+	path := pathFor(dir, testKey())
 	if err := os.WriteFile(path, []byte(`{"product": {"code": `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestEntriesAreShardedByHashPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rel, err := filepath.Rel(dir, c.pathFor(testKey()))
+	rel, err := filepath.Rel(dir, pathFor(dir, testKey()))
 	if err != nil {
 		t.Fatal(err)
 	}
