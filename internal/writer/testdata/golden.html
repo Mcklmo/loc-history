@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>loc-history</title>
+<style>
+:root {
+  color-scheme: light;
+  --page:           #f9f9f7;
+  --surface:        #fcfcfb;
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #898781;
+  --border:         rgba(11, 11, 11, 0.10);
+
+  --cell-none: #e1e0d9;
+  --cell-zero: #f0efec;
+  --pos-1: #b7d3f6;
+  --pos-2: #6da7ec;
+  --pos-3: #2a78d6;
+  --pos-4: #184f95;
+  --neg-1: #fac0ba;
+  --neg-2: #ee7e77;
+  --neg-3: #d2383a;
+  --neg-4: #911e22;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page:           #0d0d0d;
+    --surface:        #1a1a19;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --border:         rgba(255, 255, 255, 0.10);
+
+    --cell-none: #2c2c2a;
+    --cell-zero: #383835;
+    --pos-1: #184f95;
+    --pos-2: #2a78d6;
+    --pos-3: #3987e5;
+    --pos-4: #86b6ef;
+    --neg-1: #911e22;
+    --neg-2: #d2383a;
+    --neg-3: #e24a48;
+    --neg-4: #f2958e;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page:           #0d0d0d;
+  --surface:        #1a1a19;
+  --text-primary:   #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted:     #898781;
+  --border:         rgba(255, 255, 255, 0.10);
+
+  --cell-none: #2c2c2a;
+  --cell-zero: #383835;
+  --pos-1: #184f95;
+  --pos-2: #2a78d6;
+  --pos-3: #3987e5;
+  --pos-4: #86b6ef;
+  --neg-1: #911e22;
+  --neg-2: #d2383a;
+  --neg-3: #e24a48;
+  --neg-4: #f2958e;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 2rem 1.25rem 4rem;
+  background: var(--page);
+  color: var(--text-primary);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 60rem; margin: 0 auto; }
+
+h1 { margin: 0; font-size: 1.35rem; font-weight: 600; letter-spacing: -0.01em; }
+.subtitle { margin: 0.25rem 0 0; color: var(--text-secondary); }
+
+.card {
+  margin-top: 1.5rem;
+  padding: 1.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.tiles { display: flex; flex-wrap: wrap; gap: 1.75rem; }
+.tile-label { color: var(--text-secondary); font-size: 0.8125rem; }
+.tile-value { margin-top: 0.125rem; font-size: 1.5rem; font-weight: 600; letter-spacing: -0.02em; }
+.tile-note { color: var(--text-muted); font-size: 0.75rem; }
+
+figure { margin: 0; }
+figcaption { margin-bottom: 0.875rem; color: var(--text-secondary); }
+
+ 
+.scroll { overflow-x: auto; padding-bottom: 0.25rem; }
+svg { display: block; }
+text { fill: var(--text-muted); font-size: 10px; }
+
+.cell { rx: 2; ry: 2; stroke: var(--border); stroke-width: 0.5; }
+.cell.none { fill: var(--cell-none); }
+.cell.zero { fill: var(--cell-zero); }
+.cell.pos1 { fill: var(--pos-1); }
+.cell.pos2 { fill: var(--pos-2); }
+.cell.pos3 { fill: var(--pos-3); }
+.cell.pos4 { fill: var(--pos-4); }
+.cell.neg1 { fill: var(--neg-1); }
+.cell.neg2 { fill: var(--neg-2); }
+.cell.neg3 { fill: var(--neg-3); }
+.cell.neg4 { fill: var(--neg-4); }
+ 
+.cell:hover, .cell:focus { stroke: var(--text-primary); stroke-width: 1.5; outline: none; }
+
+.legend { display: flex; align-items: center; gap: 0.5rem; margin-top: 1rem; flex-wrap: wrap; }
+.legend-end { color: var(--text-secondary); font-size: 0.8125rem; white-space: nowrap; }
+.swatches { display: flex; gap: 2px; }
+.swatch { width: 15px; height: 15px; border-radius: 2px; border: 1px solid var(--border); }
+.swatch.zero { background: var(--cell-zero); }
+.swatch.pos1 { background: var(--pos-1); }
+.swatch.pos2 { background: var(--pos-2); }
+.swatch.pos3 { background: var(--pos-3); }
+.swatch.pos4 { background: var(--pos-4); }
+.swatch.neg1 { background: var(--neg-1); }
+.swatch.neg2 { background: var(--neg-2); }
+.swatch.neg3 { background: var(--neg-3); }
+.swatch.neg4 { background: var(--neg-4); }
+.legend-note { width: 100%; margin: 0; color: var(--text-muted); font-size: 0.75rem; }
+
+details { margin-top: 1.5rem; }
+summary { cursor: pointer; color: var(--text-secondary); }
+table { width: 100%; margin-top: 0.875rem; border-collapse: collapse; font-size: 0.8125rem; }
+th, td { padding: 0.375rem 0.5rem; text-align: left; border-bottom: 1px solid var(--border); }
+th { color: var(--text-secondary); font-weight: 600; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.sha { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text-secondary); }
+.empty { color: var(--text-secondary); }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>loc-history</h1>
+  <p class="subtitle">fixture · main · src</p>
+</header>
+
+<section class="card tiles">
+  <div>
+    <div class="tile-label">Lines today</div>
+    <div class="tile-value">2210</div>
+    <div class="tile-note">1310 product · 900 test</div>
+  </div><div>
+    <div class="tile-label">Written / removed</div>
+    <div class="tile-value">&#43;2620 / −410</div>
+    <div class="tile-note">summed over every commit</div>
+  </div><div>
+    <div class="tile-label">Commits</div>
+    <div class="tile-value">8</div>
+    <div class="tile-note">3 Mar 2026 – 17 Mar 2026</div>
+  </div>
+</section>
+
+<section class="card">
+<figure>
+  <figcaption>Net lines of code added or removed each day. Deletions are shown as deletions, not as zero.</figcaption>
+  <div class="scroll">
+    <svg width="80" height="132" viewBox="0 0 80 132" role="img"
+         aria-label="Calendar heat map of daily net change in lines of code. The same values are listed in the table below.">
+      <text x="32" y="12">Mar 2026</text>
+      <text x="0" y="31">Mon</text>
+      <text x="0" y="63">Wed</text>
+      <text x="0" y="95">Fri</text>
+      <rect class="cell none" x="32" y="20" width="13" height="13" tabindex="0"><title>Mon 2026-03-02 · no commits</title></rect>
+      <rect class="cell pos2" x="32" y="36" width="13" height="13" tabindex="0"><title>Tue 2026-03-03 · &#43;412 lines · 2 commits
+chore: repo init
+feat: first module</title></rect>
+      <rect class="cell pos3" x="32" y="52" width="13" height="13" tabindex="0"><title>Wed 2026-03-04 · &#43;588 lines · 2 commits
+feat: add the panel
+test: cover the panel</title></rect>
+      <rect class="cell none" x="32" y="68" width="13" height="13" tabindex="0"><title>Thu 2026-03-05 · no commits</title></rect>
+      <rect class="cell neg1" x="32" y="84" width="13" height="13" tabindex="0"><title>Fri 2026-03-06 · -320 lines · 1 commit
+refactor: collapse three modules into one</title></rect>
+      <rect class="cell none" x="32" y="100" width="13" height="13" tabindex="0"><title>Sat 2026-03-07 · no commits</title></rect>
+      <rect class="cell none" x="32" y="116" width="13" height="13" tabindex="0"><title>Sun 2026-03-08 · no commits</title></rect>
+      <rect class="cell zero" x="48" y="20" width="13" height="13" tabindex="0"><title>Mon 2026-03-09 · &#43;0 lines · 1 commit
+docs: comments only</title></rect>
+      <rect class="cell none" x="48" y="36" width="13" height="13" tabindex="0"><title>Tue 2026-03-10 · no commits</title></rect>
+      <rect class="cell pos4" x="48" y="52" width="13" height="13" tabindex="0"><title>Wed 2026-03-11 · &#43;1620 lines · 1 commit
+feat: the big one</title></rect>
+      <rect class="cell none" x="48" y="68" width="13" height="13" tabindex="0"><title>Thu 2026-03-12 · no commits</title></rect>
+      <rect class="cell none" x="48" y="84" width="13" height="13" tabindex="0"><title>Fri 2026-03-13 · no commits</title></rect>
+      <rect class="cell none" x="48" y="100" width="13" height="13" tabindex="0"><title>Sat 2026-03-14 · no commits</title></rect>
+      <rect class="cell none" x="48" y="116" width="13" height="13" tabindex="0"><title>Sun 2026-03-15 · no commits</title></rect>
+      <rect class="cell none" x="64" y="20" width="13" height="13" tabindex="0"><title>Mon 2026-03-16 · no commits</title></rect>
+      <rect class="cell neg1" x="64" y="36" width="13" height="13" tabindex="0"><title>Tue 2026-03-17 · -90 lines · 1 commit
+fix: trim dead code</title></rect>
+      <rect class="cell none" x="64" y="52" width="13" height="13" tabindex="0"><title>Wed 2026-03-18 · no commits</title></rect>
+      <rect class="cell none" x="64" y="68" width="13" height="13" tabindex="0"><title>Thu 2026-03-19 · no commits</title></rect>
+      <rect class="cell none" x="64" y="84" width="13" height="13" tabindex="0"><title>Fri 2026-03-20 · no commits</title></rect>
+      <rect class="cell none" x="64" y="100" width="13" height="13" tabindex="0"><title>Sat 2026-03-21 · no commits</title></rect>
+      <rect class="cell none" x="64" y="116" width="13" height="13" tabindex="0"><title>Sun 2026-03-22 · no commits</title></rect>
+      
+    </svg>
+  </div>
+  <div class="legend">
+    <span class="legend-end">-320 removed</span>
+    <span class="swatches"><span class="swatch neg4" title="largest net deletion"></span><span class="swatch neg3"></span><span class="swatch neg2"></span><span class="swatch neg1"></span><span class="swatch zero" title="no net change"></span><span class="swatch pos1"></span><span class="swatch pos2"></span><span class="swatch pos3"></span><span class="swatch pos4" title="largest net addition"></span></span>
+    <span class="legend-end">&#43;1620 added</span>
+    <p class="legend-note">Intensity steps at the quartiles of daily magnitude (320, 412, 588 lines).</p>
+  </div>
+</figure>
+</section>
+
+
+<details>
+  <summary>Table view — every commit</summary>
+  <table>
+    <thead><tr>
+      <th>Date</th><th>Commit</th><th>Subject</th>
+      <th class="num">Product</th><th class="num">Test</th><th class="num">Total</th><th class="num">Δ</th>
+    </tr></thead>
+    <tbody>
+      <tr>
+        <td>2026-03-03</td><td class="sha">08ab753</td><td>chore: repo init</td>
+        <td class="num">—</td><td class="num">—</td>
+        <td class="num">—</td><td class="num">&#43;0</td>
+      </tr>
+      <tr>
+        <td>2026-03-03</td><td class="sha">d251527</td><td>feat: first module</td>
+        <td class="num">412</td><td class="num">0</td>
+        <td class="num">412</td><td class="num">&#43;412</td>
+      </tr>
+      <tr>
+        <td>2026-03-04</td><td class="sha">9a9dab4</td><td>feat: add the panel</td>
+        <td class="num">620</td><td class="num">140</td>
+        <td class="num">760</td><td class="num">&#43;348</td>
+      </tr>
+      <tr>
+        <td>2026-03-04</td><td class="sha">1c2b3a4</td><td>test: cover the panel</td>
+        <td class="num">620</td><td class="num">380</td>
+        <td class="num">1000</td><td class="num">&#43;240</td>
+      </tr>
+      <tr>
+        <td>2026-03-06</td><td class="sha">5e6f7a8</td><td>refactor: collapse three modules into one</td>
+        <td class="num">300</td><td class="num">380</td>
+        <td class="num">680</td><td class="num">-320</td>
+      </tr>
+      <tr>
+        <td>2026-03-09</td><td class="sha">b1c2d3e</td><td>docs: comments only</td>
+        <td class="num">300</td><td class="num">380</td>
+        <td class="num">680</td><td class="num">&#43;0</td>
+      </tr>
+      <tr>
+        <td>2026-03-11</td><td class="sha">f4a5b6c</td><td>feat: the big one</td>
+        <td class="num">1400</td><td class="num">900</td>
+        <td class="num">2300</td><td class="num">&#43;1620</td>
+      </tr>
+      <tr>
+        <td>2026-03-17</td><td class="sha">0d1e2f3</td><td>fix: trim dead code</td>
+        <td class="num">1310</td><td class="num">900</td>
+        <td class="num">2210</td><td class="num">-90</td>
+      </tr>
+      
+    </tbody>
+  </table>
+</details>
+</main>
+</body>
+</html>

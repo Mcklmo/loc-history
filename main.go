@@ -54,6 +54,7 @@ type config struct {
 	Out        []string
 	FileOut    string
 	FileFormat writer.Format
+	GraphOut   string
 
 	Jobs        int
 	WorkDir     string
@@ -67,7 +68,7 @@ type config struct {
 
 // knownSinks is the set --out accepts. Adding a sink is additive: implement
 // writer.Writer, then name it here.
-var knownSinks = map[string]bool{"console": true, "file": true}
+var knownSinks = map[string]bool{"console": true, "file": true, "graph": true}
 
 func parseFlags(args []string, errOut io.Writer) (config, error) {
 	var cfg config
@@ -80,9 +81,10 @@ func parseFlags(args []string, errOut io.Writer) (config, error) {
 	fs.StringVar(&cfg.Folder, "folder", "src", "source folder to count")
 	fs.StringVar(&cfg.TestRegex, "test-regex", cloc.DefaultTestRegex,
 		"regex splitting test files from product files, matched against the basename")
-	fs.StringVar(&out, "out", "console", "sinks, comma-separated: console, file")
+	fs.StringVar(&out, "out", "console", "sinks, comma-separated: console, file, graph")
 	fs.StringVar(&cfg.FileOut, "file-out", "loc-history.csv", "path for the file sink")
 	fs.StringVar(&fileFormat, "file-format", "csv", "file sink format: csv or ndjson")
+	fs.StringVar(&cfg.GraphOut, "graph-out", "loc-history.html", "path for the heat map sink")
 	fs.IntVar(&cfg.Jobs, "jobs", 4, "commits processed concurrently")
 	fs.StringVar(&cfg.WorkDir, "work-dir", "/tmp",
 		"scratch root; must be a path Docker is allowed to bind-mount")
@@ -150,6 +152,20 @@ func ParseFileFormat(s string) (writer.Format, error) {
 	return f, nil
 }
 
+// graphSubtitle says what was counted, so a saved page is still legible a
+// month later.
+func graphSubtitle(cfg config) string {
+	repo := cfg.Repo
+	if abs, err := filepath.Abs(repo); err == nil {
+		repo = filepath.Base(abs)
+	}
+	folder := cfg.Folder
+	if folder == "" {
+		folder = "whole tree"
+	}
+	return fmt.Sprintf("%s · %s · %s", repo, cfg.Branch, folder)
+}
+
 func sinkNames() []string {
 	names := make([]string, 0, len(knownSinks))
 	for name := range knownSinks {
@@ -201,6 +217,16 @@ func execute(ctx context.Context, cfg config, runner cloc.Runner, stdout, stderr
 				return err
 			}
 			sinks = append(sinks, f)
+		case "graph":
+			g, err := writer.NewGraph(cfg.GraphOut, writer.GraphOptions{
+				Title:    "loc-history",
+				Subtitle: graphSubtitle(cfg),
+			})
+			if err != nil {
+				writer.MultiWriter(sinks...).Close()
+				return err
+			}
+			sinks = append(sinks, g)
 		}
 	}
 

@@ -398,3 +398,79 @@ func TestExecuteWritesNDJSON(t *testing.T) {
 		t.Errorf("--out=file should not print a table:\n%s", stdout.String())
 	}
 }
+
+func TestExecuteWritesAGraph(t *testing.T) {
+	r := gittest.New(t)
+	r.Write("src/app.js", "const a = 1\n")
+	r.Commit("feat: first")
+	r.Write("src/app.js", "const a = 1\nconst b = 2\n")
+	r.Commit("feat: second")
+
+	out := filepath.Join(t.TempDir(), "graph.html")
+	cfg, err := parseFlags([]string{
+		"--repo=" + r.Dir, "--work-dir=" + t.TempDir(), "--cache-dir=" + t.TempDir(),
+		"--out=graph", "--graph-out=" + out,
+	}, new(bytes.Buffer))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := execute(context.Background(), cfg, &cloc.FakeRunner{}, &stdout, &stderr); err != nil {
+		t.Fatalf("execute() error = %v", err)
+	}
+
+	page := string(mustRead(t, out))
+	if !strings.Contains(page, "</html>") {
+		t.Fatal("graph sink produced an incomplete page")
+	}
+	// The subtitle says what was counted, so a saved page stays legible.
+	if !strings.Contains(page, "main") || !strings.Contains(page, "src") {
+		t.Errorf("page does not record the branch and folder it charted")
+	}
+	if !strings.Contains(page, "feat: second") {
+		t.Error("page does not list the commits")
+	}
+}
+
+// All three sinks from one walk.
+func TestExecuteComposesAllThreeSinks(t *testing.T) {
+	r := gittest.New(t)
+	r.Write("src/app.js", "const a = 1\n")
+	r.Commit("feat: first")
+
+	dir := t.TempDir()
+	csvOut := filepath.Join(dir, "h.csv")
+	htmlOut := filepath.Join(dir, "h.html")
+	cfg, err := parseFlags([]string{
+		"--repo=" + r.Dir, "--work-dir=" + t.TempDir(), "--cache-dir=" + t.TempDir(),
+		"--out=console,file,graph", "--file-out=" + csvOut, "--graph-out=" + htmlOut,
+	}, new(bytes.Buffer))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := execute(context.Background(), cfg, &cloc.FakeRunner{}, &stdout, &stderr); err != nil {
+		t.Fatalf("execute() error = %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "feat: first") {
+		t.Error("console sink produced nothing")
+	}
+	if !strings.Contains(string(mustRead(t, csvOut)), "feat: first") {
+		t.Error("file sink produced nothing")
+	}
+	if !strings.Contains(string(mustRead(t, htmlOut)), "feat: first") {
+		t.Error("graph sink produced nothing")
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return b
+}

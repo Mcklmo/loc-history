@@ -33,7 +33,12 @@ then a commit.
 - [x] **8. `FileWriter`** — csv (via `encoding/csv`, so hostile subjects quote correctly) and
       ndjson (whole `Record`, keeping files/comment/blank the CSV projection drops). Buffered,
       flushed on `Close`; parent directories created. 12 tests + 4 CLI tests.
-- [ ] 9. `GraphWriter`
+- [x] **9. `GraphWriter`** — self-contained HTML calendar heat map: no script, link, image or
+      external URL, so it opens from disk. Diverging blue↔red scale with a neutral midpoint,
+      quartile intensity steps, per-cell `<title>`, legend anchoring both ends, stat tiles,
+      `<details>` table view, theme-aware via `prefers-color-scheme` **and** a `data-theme`
+      override. Golden-file test + 12 behavioural tests + 2 CLI tests. Rendered and eyeballed
+      in both schemes.
 - [ ] 10. End-to-end verification
 
 ## Findings that contradicted the brief
@@ -69,6 +74,14 @@ Verified against the real image, not assumed:
   reports 935 product / 1392 test / 2327 total. Independently confirmed by extracting the
   tree by hand and running the three cloc queries directly: 935 + 1392 = 2327.
 - **Location.** Standalone module at the repo root, not `tools/loc-history/` inside a host repo.
+- **The diverging ramp's red arm is computed.** The `dataviz` reference palette documents a
+  full blue sequential ramp but no red one, and the documented diverging pair is blue↔red.
+  Each red step therefore takes its blue counterpart's OKLCH lightness at the documented
+  red's hue, chroma scaled by the ratio between the two documented poles. The gate for a
+  diverging ramp is lightness monotonicity, not the categorical adjacency checks (running the
+  categorical validator on a ramp fails by design) — verified: `|L − L_mid|` rises
+  monotonically along each arm in both modes, four steps per arm. The innermost steps sit
+  below 3:1 on purpose, which the table view and per-cell titles relieve.
 - **CSV has a tenth column, `skipped`.** The nine specified columns cannot distinguish "the
   folder was absent" from "the folder was present and empty" — both are zero. NDJSON carries
   it already, since it emits the whole `Record`.
