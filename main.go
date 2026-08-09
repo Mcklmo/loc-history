@@ -10,11 +10,13 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/mcklmo/loc-history/internal/cache"
 	"github.com/mcklmo/loc-history/internal/cloc"
 	"github.com/mcklmo/loc-history/internal/gitlog"
 	"github.com/mcklmo/loc-history/internal/pipeline"
@@ -53,6 +55,8 @@ type config struct {
 
 	Jobs        int
 	WorkDir     string
+	CacheDir    string
+	NoCache     bool
 	FirstParent bool
 	Limit       int
 	FailFast    bool
@@ -81,6 +85,8 @@ func parseFlags(args []string, errOut io.Writer) (config, error) {
 	fs.BoolVar(&cfg.FirstParent, "first-parent", true, "follow the trunk only")
 	fs.IntVar(&cfg.Limit, "limit", 0, "most recent N commits; 0 means all")
 	fs.BoolVar(&cfg.FailFast, "fail-fast", false, "abort on the first commit that fails")
+	fs.StringVar(&cfg.CacheDir, "cache-dir", defaultCacheDir(), "where counted commits are remembered")
+	fs.BoolVar(&cfg.NoCache, "no-cache", false, "recompute everything, ignoring stored counts")
 	fs.StringVar(&cfg.Image, "image", cloc.DefaultImage, "cloc container image")
 
 	if err := fs.Parse(args); err != nil {
@@ -114,6 +120,16 @@ func parseFlags(args []string, errOut io.Writer) (config, error) {
 	return cfg, nil
 }
 
+// defaultCacheDir puts entries where the platform expects a cache to live —
+// ~/Library/Caches on macOS, $XDG_CACHE_HOME or ~/.cache elsewhere.
+func defaultCacheDir() string {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return filepath.Join(".", ".loc-history-cache")
+	}
+	return filepath.Join(base, "loc-history")
+}
+
 func sinkNames() []string {
 	names := make([]string, 0, len(knownSinks))
 	for name := range knownSinks {
@@ -135,8 +151,20 @@ func execute(ctx context.Context, cfg config, runner cloc.Runner, stdout, stderr
 
 	// One canary container before spending a hundred more: a scratch directory
 	// Docker cannot see mounts empty, and cloc reports that as a clean zero.
-	if err := cloc.VerifyMount(ctx, runner, cfg.WorkDir); err != nil {
+	clocVersion, err := cloc.VerifyMount(ctx, runner, cfg.WorkDir)
+	if err != nil {
 		return err
+	}
+
+	var store pipeline.Cache
+	if !cfg.NoCache {
+		// A commit tree never changes, so yesterday's count is still today's
+		// answer as long as the question is identical.
+		c, err := cache.New(cfg.CacheDir)
+		if err != nil {
+			return err
+		}
+		store = c
 	}
 
 	sinks := make([]writer.Writer, 0, len(cfg.Out))
@@ -156,7 +184,11 @@ func execute(ctx context.Context, cfg config, runner cloc.Runner, stdout, stderr
 		Jobs:      cfg.Jobs,
 		WorkDir:   cfg.WorkDir,
 		FailFast:  cfg.FailFast,
-		ErrOut:    stderr,
+
+		Cache:       store,
+		ClocVersion: clocVersion,
+
+		ErrOut: stderr,
 	})
 
 	fmt.Fprintf(stderr, "%d commits, %d skipped, %d failed in %s\n",

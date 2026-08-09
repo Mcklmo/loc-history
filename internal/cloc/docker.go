@@ -104,7 +104,8 @@ const canaryName = "canary/probe.c"
 const canaryBody = "int main(void) {\n  return 0;\n}\n"
 
 // VerifyMount proves that a directory created under workDir is actually
-// visible inside the container before the walk begins.
+// visible inside the container before the walk begins, and returns the cloc
+// version that answered.
 //
 // This exists because a scratch directory outside Docker Desktop's shared
 // paths mounts as *empty* rather than failing: cloc then reports zero for
@@ -112,29 +113,32 @@ const canaryBody = "int main(void) {\n  return 0;\n}\n"
 // nothing. cloc answers `{}` identically for "the mount is empty" and "nothing
 // matched", so the only way to tell them apart is to ask a question whose
 // answer is known in advance.
-func VerifyMount(ctx context.Context, r Runner, workDir string) error {
+//
+// The version comes back because the cache is keyed on it and would otherwise
+// need a second container to find it out.
+func VerifyMount(ctx context.Context, r Runner, workDir string) (string, error) {
 	dir, err := os.MkdirTemp(workDir, "loc-history-preflight-")
 	if err != nil {
-		return fmt.Errorf("create preflight directory in %s: %w", workDir, err)
+		return "", fmt.Errorf("create preflight directory in %s: %w", workDir, err)
 	}
 	defer os.RemoveAll(dir)
 
 	target := filepath.Join(dir, filepath.FromSlash(canaryName))
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return err
+		return "", err
 	}
 	if err := os.WriteFile(target, []byte(canaryBody), 0o644); err != nil {
-		return err
+		return "", err
 	}
 
 	out, err := r.Count(ctx, dir, "canary", Options{})
 	if err != nil {
-		return err
+		return "", err
 	}
 	if out.Count.Code == 0 {
-		return fmt.Errorf("%w: %s mounted empty inside the container — "+
+		return "", fmt.Errorf("%w: %s mounted empty inside the container — "+
 			"Docker Desktop only shares a fixed set of host paths, so pass --work-dir "+
 			"pointing somewhere shared (/tmp works by default)", ErrMountNotShared, workDir)
 	}
-	return nil
+	return out.Version, nil
 }

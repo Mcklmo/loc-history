@@ -201,8 +201,12 @@ func TestDockerRunnerHonoursContextCancellation(t *testing.T) {
 func TestVerifyMountPassesOnASharedPath(t *testing.T) {
 	requireDocker(t)
 
-	if err := VerifyMount(context.Background(), NewDockerRunner(), "/tmp"); err != nil {
+	version, err := VerifyMount(context.Background(), NewDockerRunner(), "/tmp")
+	if err != nil {
 		t.Errorf("VerifyMount(/tmp) error = %v, want nil on a shared path", err)
+	}
+	if version == "" {
+		t.Error("VerifyMount returned no cloc version; the cache key depends on it")
 	}
 }
 
@@ -213,7 +217,7 @@ func TestVerifyMountFailsWhenTheMountShowsUpEmpty(t *testing.T) {
 		return Output{Empty: true}, nil
 	}}
 
-	err := VerifyMount(context.Background(), blind, t.TempDir())
+	_, err := VerifyMount(context.Background(), blind, t.TempDir())
 
 	if err == nil {
 		t.Fatal("VerifyMount() accepted a mount that reported nothing")

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -202,5 +203,95 @@ func TestExecuteHonoursLimit(t *testing.T) {
 
 	if n := strings.Count(stdout.String(), "\n"); n != 3 {
 		t.Errorf("got %d lines, want a header plus 2 commits:\n%s", n, stdout.String())
+	}
+}
+
+func TestParseFlagsCacheDefaults(t *testing.T) {
+	cfg, err := parseFlags(nil, new(bytes.Buffer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NoCache {
+		t.Error("no-cache should default to false")
+	}
+	if !strings.Contains(cfg.CacheDir, "loc-history") {
+		t.Errorf("cache-dir = %q, want a loc-history directory", cfg.CacheDir)
+	}
+	if !filepath.IsAbs(cfg.CacheDir) {
+		t.Errorf("cache-dir = %q, want an absolute path", cfg.CacheDir)
+	}
+}
+
+// The cache is what turns this from a one-off into a repeatable command:
+// a second run must be free and produce byte-identical output.
+func TestASecondExecuteIsFreeAndIdentical(t *testing.T) {
+	r := gittest.New(t)
+	for i := range 4 {
+		r.Write("src/app.js", strings.Repeat("const a = 1\n", i+1))
+		r.Write("src/app.test.js", "test('a', () => {})\n")
+		r.Commit("commit")
+	}
+
+	cacheDir := t.TempDir()
+	args := []string{"--repo=" + r.Dir, "--work-dir=" + t.TempDir(), "--cache-dir=" + cacheDir}
+	cfg, err := parseFlags(args, new(bytes.Buffer))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cold := &cloc.FakeRunner{}
+	var first, stderr bytes.Buffer
+	if err := execute(context.Background(), cfg, cold, &first, &stderr); err != nil {
+		t.Fatalf("first execute() error = %v", err)
+	}
+
+	warm := &cloc.FakeRunner{}
+	var second bytes.Buffer
+	if err := execute(context.Background(), cfg, warm, &second, &stderr); err != nil {
+		t.Fatalf("second execute() error = %v", err)
+	}
+
+	if first.String() != second.String() {
+		t.Errorf("output differs between runs\nfirst:\n%s\nsecond:\n%s", first.String(), second.String())
+	}
+	// One call remains: the preflight canary, which is not cached.
+	if warm.Calls() != 1 {
+		t.Errorf("warm run made %d container calls, want only the preflight", warm.Calls())
+	}
+	if cold.Calls() <= warm.Calls() {
+		t.Errorf("cold run made %d calls, warm made %d; the cache did nothing", cold.Calls(), warm.Calls())
+	}
+}
+
+func TestNoCacheForcesARecount(t *testing.T) {
+	r := gittest.New(t)
+	r.Write("src/app.js", "const a = 1\n")
+	r.Commit("commit")
+
+	cacheDir := t.TempDir()
+	base := []string{"--repo=" + r.Dir, "--work-dir=" + t.TempDir(), "--cache-dir=" + cacheDir}
+
+	cfg, err := parseFlags(base, new(bytes.Buffer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if err := execute(context.Background(), cfg, &cloc.FakeRunner{}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err = parseFlags(append(base, "--no-cache"), new(bytes.Buffer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &cloc.FakeRunner{}
+	stdout.Reset()
+	if err := execute(context.Background(), cfg, runner, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+
+	// Preflight plus product and test for the single commit.
+	if runner.Calls() != 3 {
+		t.Errorf("made %d calls with --no-cache, want 3", runner.Calls())
 	}
 }

@@ -26,7 +26,10 @@ then a commit.
       passes under `-race`.
 - [x] **6. `main.go`** — flag parsing with validation, sink wiring, `VerifyMount` preflight,
       signal-cancellable walk, run summary. 13 tests. First real containerised run done.
-- [ ] 7. `cache`
+- [x] **7. `cache`** — content-addressed by (sha, folder, regex, cloc version) plus a schema
+      tag, sharded, atomic renames, corrupt entries degrade to a recount. Consulted before
+      extraction, so a hit skips the tar too. 12 cache tests + 5 pipeline tests + 3 CLI tests.
+      Measured on this repo: 1.885s cold, 0s warm, byte-identical output.
 - [ ] 8. `FileWriter`
 - [ ] 9. `GraphWriter`
 - [ ] 10. End-to-end verification

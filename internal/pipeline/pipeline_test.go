@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mcklmo/loc-history/internal/cache"
 	"github.com/mcklmo/loc-history/internal/cloc"
 	"github.com/mcklmo/loc-history/internal/gitlog"
 	"github.com/mcklmo/loc-history/internal/gittest"
@@ -407,5 +408,150 @@ func TestEachCommitIsCountedTwice(t *testing.T) {
 
 	if got := runner.Calls(); got != 2*len(commits) {
 		t.Errorf("runner called %d times, want %d (product and test per commit)", got, 2*len(commits))
+	}
+}
+
+// --- caching ---
+
+func TestASecondRunIsServedEntirelyFromCache(t *testing.T) {
+	repo, commits := buildRepo(t, 6)
+	store, err := cache.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := testOptions(repo.Dir, t.TempDir())
+	opts.Cache = store
+	opts.ClocVersion = "fake"
+
+	cold := &cloc.FakeRunner{}
+	first := &collector{}
+	if _, err := Run(context.Background(), commits, cold, first, opts); err != nil {
+		t.Fatal(err)
+	}
+	if cold.Calls() != 2*len(commits) {
+		t.Fatalf("cold run made %d calls, want %d", cold.Calls(), 2*len(commits))
+	}
+
+	warm := &cloc.FakeRunner{}
+	second := &collector{}
+	if _, err := Run(context.Background(), commits, warm, second, opts); err != nil {
+		t.Fatal(err)
+	}
+
+	if warm.Calls() != 0 {
+		t.Errorf("warm run made %d container calls, want 0", warm.Calls())
+	}
+	if len(second.records) != len(first.records) {
+		t.Fatalf("warm run produced %d records, cold produced %d", len(second.records), len(first.records))
+	}
+	for i := range first.records {
+		if first.records[i] != second.records[i] {
+			t.Errorf("record %d differs between runs\ncold: %+v\nwarm: %+v", i, first.records[i], second.records[i])
+		}
+	}
+}
+
+// A cache keyed on a stale cloc version would serve numbers that version never
+// produced.
+func TestADifferentClocVersionInvalidatesTheCache(t *testing.T) {
+	repo, commits := buildRepo(t, 4)
+	store, err := cache.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := testOptions(repo.Dir, t.TempDir())
+	opts.Cache = store
+	opts.ClocVersion = "1.98"
+	if _, err := Run(context.Background(), commits, &cloc.FakeRunner{}, &collector{}, opts); err != nil {
+		t.Fatal(err)
+	}
+
+	opts.ClocVersion = "2.02"
+	runner := &cloc.FakeRunner{}
+	if _, err := Run(context.Background(), commits, runner, &collector{}, opts); err != nil {
+		t.Fatal(err)
+	}
+
+	if runner.Calls() != 2*len(commits) {
+		t.Errorf("made %d calls after a version change, want a full recount of %d", runner.Calls(), 2*len(commits))
+	}
+}
+
+func TestSkippedCommitsAreServedFromCacheToo(t *testing.T) {
+	r := gittest.New(t)
+	r.Write("README.md", "# no source\n")
+	r.Commit("chore: init")
+
+	commits, err := gitlog.Commits(gitlog.Options{Repo: r.Dir, Branch: "main", FirstParent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := cache.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := testOptions(r.Dir, t.TempDir())
+	opts.Cache = store
+	opts.ClocVersion = "fake"
+
+	for range 2 {
+		out := &collector{}
+		stats, err := Run(context.Background(), commits, &cloc.FakeRunner{}, out, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stats.Skipped != 1 || !out.records[0].Skipped {
+			t.Errorf("stats = %+v, record = %+v, want a skipped commit", stats, out.records[0])
+		}
+	}
+}
+
+// A commit that failed must not be remembered as an answer.
+func TestFailuresAreNotCached(t *testing.T) {
+	repo, commits := buildRepo(t, 3)
+	store, err := cache.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := testOptions(repo.Dir, t.TempDir())
+	opts.Cache = store
+	opts.ClocVersion = "fake"
+
+	broken := &cloc.FakeRunner{Err: func(string) error { return errors.New("cloc exploded") }}
+	if _, err := Run(context.Background(), commits, broken, &collector{}, opts); err != nil {
+		t.Fatal(err)
+	}
+
+	healthy := &cloc.FakeRunner{}
+	out := &collector{}
+	if _, err := Run(context.Background(), commits, healthy, out, opts); err != nil {
+		t.Fatal(err)
+	}
+
+	if healthy.Calls() != 2*len(commits) {
+		t.Errorf("made %d calls, want a full recount of %d after the failures", healthy.Calls(), 2*len(commits))
+	}
+	if len(out.records) != len(commits) {
+		t.Errorf("got %d records on the retry, want %d", len(out.records), len(commits))
+	}
+}
+
+func TestANilCacheDisablesCachingEntirely(t *testing.T) {
+	repo, commits := buildRepo(t, 3)
+	opts := testOptions(repo.Dir, t.TempDir())
+	opts.Cache = nil
+
+	for range 2 {
+		runner := &cloc.FakeRunner{}
+		if _, err := Run(context.Background(), commits, runner, &collector{}, opts); err != nil {
+			t.Fatal(err)
+		}
+		if runner.Calls() != 2*len(commits) {
+			t.Errorf("made %d calls with caching off, want %d", runner.Calls(), 2*len(commits))
+		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/mcklmo/loc-history/internal/cache"
 	"github.com/mcklmo/loc-history/internal/cloc"
 	"github.com/mcklmo/loc-history/internal/report"
 	"github.com/mcklmo/loc-history/internal/tree"
@@ -27,7 +28,19 @@ type Options struct {
 	WorkDir  string // scratch root; must be a path Docker can bind-mount
 	FailFast bool   // abort the whole run on the first commit that fails
 
+	// Cache serves commits that have already been counted. Nil disables it.
+	Cache Cache
+	// ClocVersion keys the cache; counts from another version are not answers
+	// to the same question.
+	ClocVersion string
+
 	ErrOut io.Writer // where per-commit failures are reported; nil means stderr
+}
+
+// Cache is the subset of the cache package the pipeline needs.
+type Cache interface {
+	Get(k cache.Key) (cache.Entry, bool)
+	Put(k cache.Key, e cache.Entry) error
 }
 
 // Stats summarises what a walk did.
@@ -62,10 +75,7 @@ func Run(
 		}
 	}()
 
-	errOut := opts.ErrOut
-	if errOut == nil {
-		errOut = os.Stderr
-	}
+	errLog := errOut(opts)
 	jobCount := max(opts.Jobs, 1)
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -115,7 +125,7 @@ func Run(
 		if res.err != nil {
 			stats.Failed++
 			short := report.ShortSHA(commits[res.index].SHA)
-			fmt.Fprintf(errOut, "loc-history: commit %s: %v\n", short, res.err)
+			fmt.Fprintf(errLog, "loc-history: commit %s: %v\n", short, res.err)
 			if opts.FailFast && firstErr == nil {
 				firstErr = fmt.Errorf("commit %s: %w", short, res.err)
 				cancel()
@@ -173,8 +183,24 @@ type result struct {
 }
 
 // process materialises one commit and counts it twice.
+//
+// The cache is consulted before anything else happens, so a hit skips the
+// extraction as well as both containers.
 func process(ctx context.Context, c report.Commit, runner cloc.Runner, opts Options) (report.Record, error) {
 	rec := report.NewRecord(c)
+
+	key := cache.Key{
+		SHA:         c.SHA,
+		Folder:      opts.Folder,
+		TestRegex:   opts.TestRegex,
+		ClocVersion: opts.ClocVersion,
+	}
+	if opts.Cache != nil {
+		if e, ok := opts.Cache.Get(key); ok {
+			rec.Product, rec.Test, rec.Skipped = e.Product, e.Test, e.Skipped
+			return rec, nil
+		}
+	}
 
 	// A fresh directory per commit, not per worker: a reused one would keep
 	// files that the next commit deleted, flattening every deletion.
@@ -188,25 +214,46 @@ func process(ctx context.Context, c report.Commit, runner cloc.Runner, opts Opti
 	if err != nil {
 		return rec, err
 	}
-	if !extracted.Found {
+
+	if extracted.Found {
+		base := cloc.Options{TestRegex: opts.TestRegex, Image: opts.Image}
+
+		product, err := runner.Count(ctx, dir, opts.Folder, base)
+		if err != nil {
+			return rec, fmt.Errorf("count product code: %w", err)
+		}
+
+		base.OnlyTests = true
+		test, err := runner.Count(ctx, dir, opts.Folder, base)
+		if err != nil {
+			return rec, fmt.Errorf("count test code: %w", err)
+		}
+
+		rec.Product = product.Count
+		rec.Test = test.Count
+	} else {
 		rec.Skipped = true
-		return rec, nil
 	}
 
-	base := cloc.Options{TestRegex: opts.TestRegex, Image: opts.Image}
-
-	product, err := runner.Count(ctx, dir, opts.Folder, base)
-	if err != nil {
-		return rec, fmt.Errorf("count product code: %w", err)
+	// Only successful counts are stored; a failure is not an answer.
+	if opts.Cache != nil {
+		if err := opts.Cache.Put(key, cache.Entry{
+			Product: rec.Product,
+			Test:    rec.Test,
+			Skipped: rec.Skipped,
+		}); err != nil {
+			// A cache that cannot be written is a lost optimisation, not a
+			// failed run — the numbers in hand are still correct.
+			fmt.Fprintf(errOut(opts), "loc-history: cache write for %s: %v\n", rec.Short, err)
+		}
 	}
 
-	base.OnlyTests = true
-	test, err := runner.Count(ctx, dir, opts.Folder, base)
-	if err != nil {
-		return rec, fmt.Errorf("count test code: %w", err)
-	}
-
-	rec.Product = product.Count
-	rec.Test = test.Count
 	return rec, nil
+}
+
+func errOut(opts Options) io.Writer {
+	if opts.ErrOut == nil {
+		return os.Stderr
+	}
+	return opts.ErrOut
 }
