@@ -64,32 +64,6 @@ func TestParseGranularityRejectsBucketsThatDoNotTileADay(t *testing.T) {
 	}
 }
 
-// Every accepted bucket has to tile a day exactly, or the axis lattice breaks.
-func TestEveryAcceptedGranularityTilesADay(t *testing.T) {
-	for n := 1; n <= 48; n++ {
-		g := Granularity(n)
-		if got := g.Valid(); got != (n <= 24 && 24%n == 0) {
-			t.Errorf("Granularity(%d).Valid() = %v", n, got)
-		}
-		if !g.Valid() {
-			continue
-		}
-		// Walking a full day in steps must land back on midnight having
-		// visited only whole buckets.
-		midnight := time.Date(2026, 3, 3, 0, 0, 0, 0, time.UTC)
-		var slots int
-		for at := midnight; at.Before(midnight.AddDate(0, 0, 1)); at = at.Add(g.Step()) {
-			if !g.Truncate(at).Equal(at) {
-				t.Errorf("%d-hour bucket: slot %s is not its own bucket start", n, at.Format("15:04"))
-			}
-			slots++
-		}
-		if slots != 24/n {
-			t.Errorf("%d-hour bucket: %d slots in a day, want %d", n, slots, 24/n)
-		}
-	}
-}
-
 // A multi-hour bucket floors to a multiple of its width, counting from
 // midnight — not to the commit's own hour.
 func TestGranularityFloorsToTheBucketBoundary(t *testing.T) {

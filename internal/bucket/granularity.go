@@ -30,6 +30,7 @@ const (
 // bucket width in whole hours, like 4h.
 func ParseGranularity(s string) (Granularity, error) {
 	raw := strings.ToLower(strings.TrimSpace(s))
+
 	switch raw {
 	case "hour":
 		return GranularityHour, nil
@@ -37,22 +38,56 @@ func ParseGranularity(s string) (Granularity, error) {
 		return GranularityDay, nil
 	}
 
-	digits, ok := strings.CutSuffix(raw, "h")
-	if !ok {
-		return 0, fmt.Errorf("unknown granularity %q; want hour, day, or a bucket width like 4h", s)
+	const (
+		hourSuffix = "h"
+		daySuffix  = "d"
+	)
+
+	if strings.HasSuffix(raw, hourSuffix) {
+		return parseGranularity(raw, hourSuffix, 1)
 	}
+
+	if strings.HasSuffix(raw, daySuffix) {
+		return parseGranularity(raw, daySuffix, 24)
+	}
+
+	return 0, fmt.Errorf("unknown granularity %q; want hour, day, or a bucket width like 4h or 2d", raw)
+}
+
+func parseGranularity(
+	raw string,
+	suffixIdentifier string,
+	multiplier int,
+) (Granularity, error) {
+	digits, ok := strings.CutSuffix(raw, suffixIdentifier)
+	if !ok {
+		return 0, fmt.Errorf("parseGranularity unknown granularity %q; want hour, day, or a bucket width like 4h or 2d", raw)
+	}
+
 	n, err := strconv.Atoi(digits)
 	if err != nil {
-		return 0, fmt.Errorf("unknown granularity %q; want hour, day, or a bucket width like 4h", s)
+		return 0, fmt.Errorf("unexpected int parse error %q: %w", digits, err)
 	}
-	if g := Granularity(n); g.Valid() {
-		return g, nil
+
+	g := Granularity(n * multiplier)
+	if err := g.Valid(); err != nil {
+		return 0, err
 	}
-	return 0, fmt.Errorf("bucket %q does not divide the day; want 1, 2, 3, 4, 6, 8, 12 or 24 hours", s)
+
+	return g, nil
 }
 
 // Valid reports whether buckets this wide tile a day exactly.
-func (g Granularity) Valid() bool { return g >= 1 && g <= 24 && 24%int(g) == 0 }
+func (g Granularity) Valid() error {
+	if g < 1 {
+		return fmt.Errorf("granularity %d is not positive", g)
+	}
+	if !(24%int(g) == 0 || int(g)%24 == 0) {
+		return fmt.Errorf("granularity %d does not divide the day, expected a divisor of 24 or a multiple of 24", g)
+	}
+
+	return nil
+}
 
 // Step is how much time one bucket covers.
 func (g Granularity) Step() time.Duration { return time.Duration(g) * time.Hour }

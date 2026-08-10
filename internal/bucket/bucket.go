@@ -6,7 +6,6 @@ package bucket
 
 import (
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/mcklmo/loc-history/internal/report"
@@ -73,9 +72,10 @@ type Aggregator struct {
 func NewAggregator(g Granularity, sink Sink) (*Aggregator, error) {
 	// A bucket that does not tile the day would leave columns off the lattice
 	// the graph's axis is drawn on, and they would vanish rather than misdraw.
-	if !g.Valid() {
-		return nil, fmt.Errorf("granularity: a %d-hour bucket does not divide the day", g)
+	if err := g.Valid(); err != nil {
+		return nil, err
 	}
+
 	return &Aggregator{gran: g, sink: sink}, nil
 }
 
