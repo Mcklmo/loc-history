@@ -10,6 +10,7 @@ import (
 	"errors"
 
 	"github.com/mcklmo/loc-history/internal/bucket"
+	"github.com/mcklmo/loc-history/internal/report"
 )
 
 // Writer consumes buckets in chronological order, oldest first, and is closed
@@ -17,6 +18,10 @@ import (
 // still leaves a partial artifact behind.
 type Writer interface {
 	Write(b bucket.Bucket) error
+	// Summary is the run-level footer, computed upstream in internal/bucket and
+	// offered once after the last bucket. A run with no rows never sends one,
+	// and a sink is free to drop it.
+	Summary(avg report.AverageDelta) error
 	Close() error
 }
 
@@ -46,6 +51,18 @@ func (m multi) Write(b bucket.Bucket) error {
 	return first
 }
 
+// Summary offers the footer to every sink even after one fails, and returns the
+// first error, exactly like Write.
+func (m multi) Summary(avg report.AverageDelta) error {
+	var first error
+	for _, w := range m {
+		if err := w.Summary(avg); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
 // Close closes every sink even if an earlier one fails, so a broken file sink
 // cannot leak the graph sink's file handle.
 func (m multi) Close() error {
@@ -58,5 +75,6 @@ func (m multi) Close() error {
 
 type discard struct{}
 
-func (discard) Write(bucket.Bucket) error { return nil }
-func (discard) Close() error              { return nil }
+func (discard) Write(bucket.Bucket) error         { return nil }
+func (discard) Summary(report.AverageDelta) error { return nil }
+func (discard) Close() error                      { return nil }

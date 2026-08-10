@@ -22,14 +22,7 @@ func writeAll(t *testing.T, w Writer, records ...report.Record) {
 
 func writeAllAt(t *testing.T, w Writer, gran bucket.Granularity, records ...report.Record) {
 	t.Helper()
-	for _, b := range bucketsOf(t, gran, records...) {
-		if err := w.Write(b); err != nil {
-			t.Fatalf("Write() error = %v", err)
-		}
-	}
-	if err := w.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
+	replay(t, w, runOf(t, gran, records...))
 }
 
 func readFile(t *testing.T, path string) string {
@@ -92,8 +85,8 @@ func TestCSVWritesAHeaderThenOneRowPerBucket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("output is not valid CSV: %v", err)
 	}
-	if len(rows) != 3 {
-		t.Fatalf("got %d rows, want a header plus 2 buckets", len(rows))
+	if len(rows) != 4 {
+		t.Fatalf("got %d rows, want a header, 2 buckets and the average footer", len(rows))
 	}
 
 	wantHeader := []string{
@@ -138,8 +131,8 @@ func TestCSVCollapsesABucketToOneRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("output is not valid CSV: %v", err)
 	}
-	if len(rows) != 2 {
-		t.Fatalf("got %d rows, want a header plus 1 bucket", len(rows))
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want a header, 1 bucket and the average footer", len(rows))
 	}
 	want := []string{
 		"2026-08-06T09:00:00Z", "2",
@@ -199,6 +192,92 @@ func TestCSVMarksSkippedBuckets(t *testing.T) {
 	rows, _ := csv.NewReader(strings.NewReader(readFile(t, path))).ReadAll()
 	if rows[1][12] != "true" {
 		t.Errorf("skipped = %q, want true", rows[1][12])
+	}
+}
+
+// The run-level mean rides out as a final row rather than a second file, and it
+// keeps every column so csv.Reader's field-count check still passes.
+func TestCSVEndsWithTheAverageDeltaRow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.csv")
+	w, err := NewFile(path, FormatCSV)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAll(t, w,
+		rec(6, "08ab753", "first commit", 412, 0, 0),
+		rec(7, "d251527", "git add init", 488, 100, 412),
+	)
+
+	rows, err := csv.NewReader(strings.NewReader(readFile(t, path))).ReadAll()
+	if err != nil {
+		t.Fatalf("output is not valid CSV: %v", err)
+	}
+
+	// Rows of (+412, +0, +412) and (+76, +100, +176).
+	want := []string{
+		"average_delta", "",
+		"", "", "", "",
+		"", "", "",
+		"244", "50", "294", "",
+	}
+	last := rows[len(rows)-1]
+	if strings.Join(last, ",") != strings.Join(want, ",") {
+		t.Errorf("footer = %v\nwant %v", last, want)
+	}
+	if len(last) != len(rows[0]) {
+		t.Errorf("footer has %d fields and the header %d", len(last), len(rows[0]))
+	}
+	// Nothing above it may claim to be the average.
+	for i, r := range rows[:len(rows)-1] {
+		if r[0] == "average_delta" {
+			t.Errorf("row %d is a second average row: %v", i, r)
+		}
+	}
+}
+
+// A footer of zeroes would be a measurement that never happened.
+func TestCSVWithNoRecordsHasNoAverageRow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.csv")
+	w, err := NewFile(path, FormatCSV)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAll(t, w)
+
+	rows, err := csv.NewReader(strings.NewReader(readFile(t, path))).ReadAll()
+	if err != nil {
+		t.Fatalf("output is not valid CSV: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Errorf("got %d rows, want the header alone: %v", len(rows), rows)
+	}
+}
+
+// NDJSON's contract is one Bucket per line; a footer of another shape would
+// break every consumer decoding each line into one.
+func TestNDJSONHasNoAverageLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.ndjson")
+	w, err := NewFile(path, FormatNDJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAll(t, w,
+		rec(6, "08ab753", "first commit", 412, 0, 0),
+		rec(7, "d251527", "git add init", 488, 100, 412),
+	)
+
+	for i, line := range strings.Split(strings.TrimSuffix(readFile(t, path), "\n"), "\n") {
+		var b bucket.Bucket
+		if err := json.Unmarshal([]byte(line), &b); err != nil {
+			t.Fatalf("line %d is not a Bucket: %v", i, err)
+		}
+		if b.Start.IsZero() {
+			t.Errorf("line %d decoded as a Bucket but has no start: %s", i, line)
+		}
+	}
+	// The dead per-bucket field is gone with it.
+	if strings.Contains(readFile(t, path), "average_delta") {
+		t.Error("NDJSON still mentions average_delta")
 	}
 }
 
@@ -351,7 +430,7 @@ func TestCloseFlushesAndReleasesTheFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("output is not valid CSV: %v", err)
 	}
-	if len(rows) != 501 {
-		t.Errorf("got %d rows, want 501; buffered rows were lost", len(rows))
+	if len(rows) != 502 {
+		t.Errorf("got %d rows, want 502 (header, 500 buckets, footer); buffered rows were lost", len(rows))
 	}
 }

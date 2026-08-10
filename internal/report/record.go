@@ -50,41 +50,17 @@ type Record struct {
 	Skipped   bool `json:"skipped"`    // source folder absent at this commit
 }
 
-// AverageDelta is the mean of a bucket's records, used to draw the graph's lines. It
-// is not a record itself, so it is not in the Records slice. It could be placed in the bottom of a csv output
+// AverageDelta is the mean change per output row over a whole run. The
+// arithmetic lives in bucket.Aggregator, the only thing that sees every row; it
+// is not a record, so it is not in Records, and the sinks render it once, at the
+// bottom.
+//
+// Code lines only: a row's change is a difference of the snapshots, and buckets
+// carry no per-field (files/comment/blank) deltas to average.
 type AverageDelta struct {
-	Product   Count `json:"product_average_delta"`
-	Test      Count `json:"test_average_delta"`
-	TotalCode int   `json:"total_code_average_delta"` // Product.Code + Test.Code
-}
-
-func Average(records []Record) AverageDelta {
-	var avg AverageDelta
-
-	if len(records) == 0 {
-		return avg
-	}
-
-	for _, r := range records {
-		avg.Product = avg.Product.Add(r.Product)
-		avg.Test = avg.Test.Add(r.Test)
-		avg.TotalCode += r.TotalCode
-	}
-
-	n := len(records)
-	avg.Product.Files /= n
-	avg.Product.Code /= n
-	avg.Product.Comment /= n
-	avg.Product.Blank /= n
-
-	avg.Test.Files /= n
-	avg.Test.Code /= n
-	avg.Test.Comment /= n
-	avg.Test.Blank /= n
-
-	avg.TotalCode /= n
-
-	return avg
+	Product   int `json:"product_average_delta"`
+	Test      int `json:"test_average_delta"`
+	TotalCode int `json:"total_code_average_delta"` // Product + Test, ±1 from truncation
 }
 
 // NewRecord starts a record from a commit. Counts are filled in later by the

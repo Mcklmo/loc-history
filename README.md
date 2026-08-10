@@ -10,9 +10,10 @@ console table, a CSV/NDJSON file, or a self-contained HTML page charting the two
 
 ```console
 $ loc-history --repo=~/code/my-app --folder=src --branch=main
-HOUR              SHA      COMMITS  PRODUCT    TEST     TOTAL       Δ  SUBJECT
-2026-06-22 14:00  3a20694        1      887       0       887    +887  udpate io
-2026-06-24 09:00  25eca54        2      895       0       895      +8  fix: use comma in csv o…
+HOUR              SHA      COMMITS  PRODUCT    TEST     TOTAL  PRODUCT Δ   TEST Δ         Δ  SUBJECT
+2026-06-22 14:00  3a20694        1      887       0       887       +887       +0      +887  udpate io
+2026-06-24 09:00  25eca54        2      895       0       895         +8       +0        +8  fix: use comma in csv o…
+AVERAGE Δ         -              -        -       -         -       +447       +0      +447  mean Δ per row
 5 commits, 3 skipped, 0 failed in 790ms
 ```
 
@@ -156,15 +157,25 @@ first column is headed by the unit in play (`HOUR`, `DATE`, or `BUCKET START` fo
 `4h`) and `COMMITS` says how many commits merged into the row; the SHA and subject are the
 bucket's **last** commit, so the row still names something you can go and look at. A dash
 rather than a zero means the source folder did not exist at that commit: zero lines and no
-folder are different facts.
+folder are different facts. `PRODUCT Δ`, `TEST Δ` and `Δ` are the change across the row, the
+same three numbers the CSV carries.
+
+The table closes with an `AVERAGE Δ` row: the mean of those three columns over the rows above
+it — **per row, not per commit**, so a day holding five commits counts once. It is computed
+above the sinks, so the console and the CSV cannot disagree about it. Note that the row deltas
+telescope, so each mean is just the final tree size divided by the number of rows.
 
 **`file`** — `--file-format=csv` (default) or `ndjson`, written to `--file-out`.
 CSV columns: `bucket_start,commits,last_sha,last_short,last_author,last_subject,product_code,test_code,total_code,product_delta,test_delta,delta,skipped`.
 `bucket_start` is RFC 3339 at every granularity; the `last_*` columns are the bucket's last
 commit; `product_code` and `test_code` are what let a spreadsheet reproduce the two charts, and
 `product_delta` and `test_delta` the change behind them.
+The last row of a CSV that has any is the same average as the console footer, marked by
+`average_delta` in the `bucket_start` column instead of a timestamp; only the three delta
+columns are filled in. A parser reading that column as a time should stop there.
 NDJSON emits one bucket per line **with its records nested**, so it stays lossless at any
-granularity and keeps the file/comment/blank counts the CSV projection drops.
+granularity and keeps the file/comment/blank counts the CSV projection drops — and it carries
+**no** average line, because every line is a bucket.
 
 **`graph`** — one self-contained HTML file at `--graph-out`. Inlined CSS and SVG, no scripts,
 no external URLs, so it opens straight from disk and survives being emailed.

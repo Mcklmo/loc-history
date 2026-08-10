@@ -29,19 +29,13 @@ func recAt(at time.Time, short, subject string, product, test, prevTotal int) re
 	return r
 }
 
-// writeConsole streams records through the granularity gate into a Console.
+// writeConsole streams records through the granularity gate into a Console,
+// summary included, so the tests see the table the real run prints.
 func writeConsole(t *testing.T, gran bucket.Granularity, records ...report.Record) string {
 	t.Helper()
 	var sb strings.Builder
 	c := NewConsole(&sb)
-	for _, b := range bucketsOf(t, gran, records...) {
-		if err := c.Write(b); err != nil {
-			t.Fatalf("Write() error = %v", err)
-		}
-	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
+	replay(t, c, runOf(t, gran, records...))
 	return sb.String()
 }
 
@@ -53,10 +47,11 @@ func TestConsoleWritesHeaderThenAlignedRows(t *testing.T) {
 	)
 
 	want := strings.Join([]string{
-		"HOUR              SHA      COMMITS  PRODUCT    TEST     TOTAL       Δ  SUBJECT",
-		"2026-08-06 12:00  08ab753        1      412       0       412    +412  first commit",
-		"2026-08-07 12:00  d251527        1      488       0       488     +76  git add init",
-		"2026-08-08 12:00  9a9dab4        1     3120    1804      4924    +281  refactor: extract ActivityRow",
+		"HOUR              SHA      COMMITS  PRODUCT    TEST     TOTAL  PRODUCT Δ   TEST Δ         Δ  SUBJECT",
+		"2026-08-06 12:00  08ab753        1      412       0       412       +412       +0      +412  first commit",
+		"2026-08-07 12:00  d251527        1      488       0       488        +76       +0       +76  git add init",
+		"2026-08-08 12:00  9a9dab4        1     3120    1804      4924      +2632    +1804      +281  refactor: extract ActivityRow",
+		"AVERAGE Δ         -              -        -       -         -      +1040     +601      +256  mean Δ per row",
 		"",
 	}, "\n")
 
@@ -96,11 +91,11 @@ func TestConsoleCollapsesABucketToOneRow(t *testing.T) {
 	)
 
 	lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
-	if len(lines) != 3 {
-		t.Fatalf("got %d lines, want a header plus 2 buckets:\n%s", len(lines), got)
+	if len(lines) != 4 {
+		t.Fatalf("got %d lines, want a header plus 2 buckets plus the footer:\n%s", len(lines), got)
 	}
 	// 09:00 holds two commits, ends on d251527, and nets +180.
-	want := "2026-08-06 09:00  d251527        2      100      80       180    +180  test: cover it"
+	want := "2026-08-06 09:00  d251527        2      100      80       180       +100      +80      +180  test: cover it"
 	if lines[1] != want {
 		t.Errorf("merged row =\n%q\nwant\n%q", lines[1], want)
 	}
@@ -126,7 +121,7 @@ func TestConsoleMarksSkippedBucketsWithDashes(t *testing.T) {
 	got := writeConsole(t, bucket.GranularityHour, r)
 
 	line := strings.Split(got, "\n")[1]
-	want := "2026-08-05 12:00  0000001        1        -       -         -      +0  chore: repo init"
+	want := "2026-08-05 12:00  0000001        1        -       -         -         +0       +0        +0  chore: repo init"
 	if line != want {
 		t.Errorf("skipped row =\n%q\nwant\n%q", line, want)
 	}
@@ -143,6 +138,43 @@ func TestConsoleTruncatesLongSubjects(t *testing.T) {
 	}
 	if !strings.HasSuffix(subject, "…") {
 		t.Errorf("truncated subject %q should end in an ellipsis", subject)
+	}
+}
+
+// The footer is the last line of the table, and its three means sit under the
+// delta columns they average — that alignment is the whole reason it is a row
+// rather than a sentence.
+func TestConsoleClosesTheTableWithTheAverageRow(t *testing.T) {
+	got := writeConsole(t, bucket.GranularityHour,
+		rec(6, "08ab753", "first commit", 412, 0, 0),
+		rec(7, "d251527", "git add init", 488, 100, 412),
+	)
+
+	lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
+	footer := lines[len(lines)-1]
+
+	// Rows of (+412, +0) and (+76, +100): means of +244, +50, and +294 total.
+	want := "AVERAGE Δ         -              -        -       -         -       +244      +50      +294  mean Δ per row"
+	if footer != want {
+		t.Errorf("footer =\n%q\nwant\n%q", footer, want)
+	}
+
+	// It closes the table: one header, one row per bucket, then this.
+	if len(lines) != 4 {
+		t.Errorf("got %d lines, want a header, 2 buckets and the footer:\n%s", len(lines), got)
+	}
+}
+
+// A single-commit run averages to that commit's own deltas: n = 1.
+func TestConsoleFooterOverOneRowIsThatRowsDeltas(t *testing.T) {
+	got := writeConsole(t, bucket.GranularityHour, rec(6, "08ab753", "first commit", 412, 88, 0))
+
+	lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
+	row, footer := lines[1], lines[2]
+	for _, want := range []string{"+412", "+88", "+500"} {
+		if !strings.Contains(row, want) || !strings.Contains(footer, want) {
+			t.Errorf("want %s in both the row %q and the footer %q", want, row, footer)
+		}
 	}
 }
 

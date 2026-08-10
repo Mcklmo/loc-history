@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mcklmo/loc-history/internal/bucket"
+	"github.com/mcklmo/loc-history/internal/report"
 )
 
 // Format selects how File serialises buckets.
@@ -51,6 +52,10 @@ func ParseFormat(s string) (Format, error) {
 // The trailing `skipped` column cannot be inferred from the counts before it:
 // they cannot express the difference between "the folder was not there" and
 // "the folder was there and empty" — both read as zero.
+//
+// The last row of a run that produced any is a footer, not a bucket: its
+// `bucket_start` reads `average_delta` instead of a timestamp, and only the
+// three delta columns are filled in. A naive numeric parser has to know.
 var csvHeader = []string{
 	"bucket_start", "commits",
 	"last_sha", "last_short", "last_author", "last_subject",
@@ -119,6 +124,31 @@ func (w *File) Write(b bucket.Bucket) error {
 		})
 	}
 	return w.enc.Encode(b)
+}
+
+// averageMarker stands where a bucket start would be on the footer row. It is
+// deliberately not a timestamp: a reader sorting or parsing that column trips
+// over it rather than averaging the average into its own numbers.
+const averageMarker = "average_delta"
+
+// Summary appends the footer row, keeping all 13 fields so csv.Reader's
+// field-count check still passes and the columns stay aligned with the header.
+//
+// NDJSON drops it: its contract is one Bucket per line, and a trailing object of
+// a different shape would break every consumer decoding each line into one.
+func (w *File) Summary(avg report.AverageDelta) error {
+	if w.csv == nil {
+		return nil
+	}
+	return w.csv.Write([]string{
+		averageMarker, "",
+		"", "", "", "",
+		"", "", "",
+		strconv.Itoa(avg.Product),
+		strconv.Itoa(avg.Test),
+		strconv.Itoa(avg.TotalCode),
+		"",
+	})
 }
 
 // Close flushes buffered rows and releases the file. Skipping it would lose

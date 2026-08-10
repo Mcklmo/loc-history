@@ -12,10 +12,12 @@ import (
 
 // sink collects what an Aggregator hands it and can be told to fail.
 type sink struct {
-	buckets  []Bucket
-	closed   int
-	writeErr error
-	closeErr error
+	buckets    []Bucket
+	summaries  []report.AverageDelta
+	closed     int
+	writeErr   error
+	summaryErr error
+	closeErr   error
 }
 
 func (s *sink) Write(b Bucket) error {
@@ -23,9 +25,24 @@ func (s *sink) Write(b Bucket) error {
 	return s.writeErr
 }
 
+func (s *sink) Summary(avg report.AverageDelta) error {
+	s.summaries = append(s.summaries, avg)
+	return s.summaryErr
+}
+
 func (s *sink) Close() error {
 	s.closed++
 	return s.closeErr
+}
+
+// summary is the one footer a run produces; tests that assert on it should fail
+// loudly rather than index into an empty slice.
+func (s *sink) summary(t *testing.T) report.AverageDelta {
+	t.Helper()
+	if len(s.summaries) != 1 {
+		t.Fatalf("sink got %d summaries, want exactly 1", len(s.summaries))
+	}
+	return s.summaries[0]
 }
 
 // aggregate runs records through an Aggregator, which is what the pipeline does
@@ -332,6 +349,116 @@ func TestWriteSurfacesASinkFailure(t *testing.T) {
 	}
 	if err := a.Write(records[1]); !errors.Is(err, boom) {
 		t.Errorf("Write() error = %v, want it to wrap %v", err, boom)
+	}
+}
+
+// The average is the mean per *output row*, not per commit: the two days below
+// hold two commits each, and a denominator of 8 rather than 6 would show up as
+// a visibly smaller mean.
+func TestSummaryAveragesOverRowsRatherThanCommits(t *testing.T) {
+	out := aggregate(t, GranularityDay, history()...)
+	if len(out.buckets) != 6 {
+		t.Fatalf("got %d daily buckets, want 6", len(out.buckets))
+	}
+
+	// Summed over the six rows: +1310 product, +900 test, +2210 total.
+	want := report.AverageDelta{Product: 218, Test: 150, TotalCode: 368}
+	if got := out.summary(t); got != want {
+		t.Errorf("average = %+v, want %+v (8 commits over 6 rows)", got, want)
+	}
+}
+
+// The footer is handed over after the last bucket and before Close, which is
+// what lets a streaming sink append it to output it has already flushed.
+func TestSummaryArrivesAfterEveryBucketAndBeforeClose(t *testing.T) {
+	out := aggregate(t, GranularityHour, history()...)
+	if out.closed != 1 {
+		t.Errorf("Close called %d times, want exactly 1", out.closed)
+	}
+	if len(out.summaries) != 1 {
+		t.Errorf("got %d summaries, want exactly 1 for the run", len(out.summaries))
+	}
+}
+
+// A run that produced no rows has nothing to average, and a footer of zeroes
+// would be a measurement that never happened.
+func TestAnEmptyRunIsNotSummarised(t *testing.T) {
+	out := aggregate(t, GranularityHour)
+	if len(out.summaries) != 0 {
+		t.Errorf("an empty run produced %+v, want no summary at all", out.summaries)
+	}
+	if out.closed != 1 {
+		t.Errorf("Close called %d times, want exactly 1", out.closed)
+	}
+}
+
+// Deletions are subtracted rather than ignored or taken as magnitudes: the same
+// history with one more commit that removes code averages *lower*.
+//
+// The mean of a full walk cannot itself go negative, and that is arithmetic
+// rather than clamping: the row deltas telescope, so each column sums to the
+// tree as it stood at the last commit, which is never below zero. Individual
+// rows are what carry a minus sign.
+func TestSummaryCountsDeletionsAgainstTheMean(t *testing.T) {
+	at := []time.Time{
+		time.Date(2026, 3, 3, 9, 0, 0, 0, time.UTC),
+		time.Date(2026, 3, 3, 10, 0, 0, 0, time.UTC),
+		time.Date(2026, 3, 3, 11, 0, 0, 0, time.UTC),
+	}
+
+	// commitsAt only grows: 100 then 200, so two rows of +100.
+	grew := aggregate(t, GranularityHour, commitsAt(t, at[:2]...)...).summary(t)
+	if want := (report.AverageDelta{Product: 100, TotalCode: 100}); grew != want {
+		t.Fatalf("average = %+v, want %+v", grew, want)
+	}
+
+	// A third commit cuts the tree from 200 to 40: a row of -160.
+	records := commitsAt(t, at...)
+	records[2].Product = report.Count{Files: 1, Code: 40}
+	records[2].Finalize(records[1].TotalCode)
+
+	// (+100 +100 -160) / 3 rows. Ignoring the deletion would give 66, and
+	// averaging magnitudes 120.
+	shrank := aggregate(t, GranularityHour, records...).summary(t)
+	if want := (report.AverageDelta{Product: 13, TotalCode: 13}); shrank != want {
+		t.Errorf("average = %+v, want %+v", shrank, want)
+	}
+	if shrank.TotalCode >= grew.TotalCode {
+		t.Errorf("deleting code moved the mean from %+d to %+d, want it lower",
+			grew.TotalCode, shrank.TotalCode)
+	}
+}
+
+// A truncating mean is not required to reconcile the way a bucket's sums are:
+// each column is divided on its own.
+func TestSummaryColumnsAreTruncatedIndependently(t *testing.T) {
+	out := aggregate(t, GranularityDay, history()...)
+	avg := out.summary(t)
+
+	if diff := avg.Product + avg.Test - avg.TotalCode; diff < -1 || diff > 1 {
+		t.Errorf("product %+d + test %+d = %+d, want within 1 of total %+d",
+			avg.Product, avg.Test, avg.Product+avg.Test, avg.TotalCode)
+	}
+}
+
+// The summary is offered on the way out, so a sink that rejects it must not cost
+// the run its close-exactly-once guarantee.
+func TestCloseJoinsAFailedSummaryAndStillClosesTheSink(t *testing.T) {
+	boom := errors.New("disk full")
+	out := &sink{summaryErr: boom}
+	a, err := NewAggregator(GranularityHour, out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Write(commitsAt(t, time.Date(2026, 3, 3, 9, 0, 0, 0, time.UTC))[0]); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.Close(); !errors.Is(err, boom) {
+		t.Errorf("Close() error = %v, want it to join %v", err, boom)
+	}
+	if out.closed != 1 {
+		t.Errorf("Close called %d times, want exactly 1", out.closed)
 	}
 }
 

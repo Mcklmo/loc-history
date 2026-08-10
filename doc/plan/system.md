@@ -367,9 +367,10 @@ type Bucket struct {
 }
 func (b Bucket) Last() report.Record // never empty by construction
 
-type Sink interface {                 // writer.Writer satisfies this
-    Write(Bucket) error               // structurally, so bucket never
-    Close() error                     // imports writer and there is no cycle
+type Sink interface {                       // writer.Writer satisfies this
+    Write(Bucket) error                     // structurally, so bucket never
+    Summary(report.AverageDelta) error      // imports writer and there is no
+    Close() error                           // cycle
 }
 
 func NewAggregator(g Granularity, sink Sink) (*Aggregator, error)
@@ -385,23 +386,33 @@ The aggregator rolls over only on a **strictly later** start. `pipeline` emits o
 but `git log --reverse` follows the commit graph rather than committer dates, so a record can
 in principle arrive with an earlier timestamp; folding it into the open bucket keeps one bucket
 per lattice slot, where opening a second with an already-emitted start would give the graph two
-rows for one slot and its lookup would silently drop one. `Close` flushes the open bucket and
-then closes the sink **regardless** of whether the flush failed, joining both — which is what
-preserves the close-exactly-once guarantee through the new layer.
+rows for one slot and its lookup would silently drop one. `Close` flushes the open bucket,
+offers the run-level `Summary`, and then closes the sink **regardless** of whether either
+failed, joining all three — which is what preserves the close-exactly-once guarantee through
+the new layer.
+
+The aggregator is also the only thing that sees every row, so it is where the run-level average
+is computed: `report.AverageDelta` is the mean of `ProductDelta` / `TestDelta` / `Delta` **over
+output rows, not commits** — a day holding five commits contributes one. A skipped bucket counts
+as a row, because its drop to zero is a real change; a run with no rows sends no `Summary` at
+all, rather than a footer of zeroes. Each column truncates independently, so `Product + Test`
+can sit 1 off `TotalCode` — the exact per-bucket invariant is a property of sums, not means.
+Computing it here rather than in a sink is what keeps the console and the CSV from disagreeing.
 
 ```go
 // internal/writer
 
 type Writer interface {
     Write(b bucket.Bucket) error
+    Summary(avg report.AverageDelta) error
     Close() error
 }
 
 func MultiWriter(ws ...Writer) Writer
 ```
 
-`MultiWriter` offers each bucket to **every** sink even after one fails, returning the first
-error — a broken console should not cost you the HTML report. `Close` closes all of them
+`MultiWriter` offers each bucket — and the summary — to **every** sink even after one fails,
+returning the first error: a broken console should not cost you the HTML report. `Close` closes all of them
 regardless, joining errors with `errors.Join`, so a failing file sink cannot leak the graph
 sink's file handle. `pipeline.Run` calls `Close` exactly once via `defer`, **including on
 every error path**, so an aborted run still leaves a partial artifact.
@@ -409,16 +420,23 @@ every error path**, so an aborted run still leaves a partial artifact.
 ### `Console` — streams, one line per bucket
 
 ```
-HOUR              SHA      COMMITS  PRODUCT    TEST     TOTAL       Δ  SUBJECT
-2026-08-09 15:00  fb31941        1        -       -         -      +0  chore: scaffold Go mod…
-2026-08-09 16:00  f9d02a4        3      145     320       465    +465  feat(report,writer): d…
-2026-08-09 20:00  bfb7e01        2      225     536       761    +296  feat(gitlog): enumerat…
+HOUR              SHA      COMMITS  PRODUCT    TEST     TOTAL  PRODUCT Δ   TEST Δ         Δ  SUBJECT
+2026-08-09 15:00  fb31941        1        -       -         -         +0       +0        +0  chore: scaffold Go mod…
+2026-08-09 16:00  f9d02a4        3      145     320       465       +145     +320      +465  feat(report,writer): d…
+2026-08-09 20:00  bfb7e01        2      225     536       761        +80     +216      +296  feat(gitlog): enumerat…
+AVERAGE Δ         -              -        -       -         -        +75     +178      +253  mean Δ per row
 ```
 
 The header is written lazily, on the first bucket, which is what lets its first column name the
 unit actually in play — `Column()` yields `Hour` / `Date` / `Bucket start`. SHA and subject come
 from `Last()`. Dashes, not zeroes, where the source folder was absent: zero and absent are
-different facts.
+different facts — but the deltas still print there, because the change to a snapshot is a fact
+even when the snapshot is not.
+
+`Summary` closes the table with one more row in the same `rowFmt`, so the means land under the
+delta columns they average rather than in a sentence underneath. `fmt` pads strings by rune
+count, which is what keeps a `Δ` in a label from shifting the column. It no-ops when no header
+was written, so an empty run cannot print a lone footer.
 
 ### `File` — `--file-format=csv` (default) or `ndjson`
 
@@ -433,9 +451,17 @@ the two charts, and `product_delta`/`test_delta` the change behind them. `skippe
 the original specification because without it an
 absent folder and an empty one both read as zero.
 
+A run that produced rows ends with a footer row rather than a bucket: `bucket_start` reads
+`average_delta`, only the three delta columns are filled in, and all 13 fields are present so
+`csv.Reader`'s field-count check still passes. It is documented on `csvHeader` because a footer
+is otherwise a trap for a naive numeric parser.
+
 NDJSON emits the whole `Bucket` per line with its `Records` **nested**, which is what keeps the
 file lossless however wide the bucket, and keeps the file/comment/blank counts the CSV
-projection drops.
+projection drops. It drops the summary: its contract is one `Bucket` per line, and a trailing
+object of another shape would break every consumer decoding each line into one. The graph drops
+it too — the charts plot the level the tree stood at, and a mean of row deltas has nowhere to
+sit on that axis.
 
 ### `Graph` — buffers, renders on `Close`
 

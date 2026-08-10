@@ -136,8 +136,9 @@ func TestExecuteWalksARepositoryEndToEnd(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
-	if len(lines) != 4 {
-		t.Fatalf("got %d lines, want a header plus 3 commits:\n%s", len(lines), stdout.String())
+	if len(lines) != 5 {
+		t.Fatalf("got %d lines, want a header, 3 commits and the average footer:\n%s",
+			len(lines), stdout.String())
 	}
 	// The fixture clock advances an hour per commit, so at the default
 	// granularity this is still one row per commit.
@@ -214,8 +215,9 @@ func TestExecuteHonoursLimit(t *testing.T) {
 		t.Fatalf("execute() error = %v", err)
 	}
 
-	if n := strings.Count(stdout.String(), "\n"); n != 3 {
-		t.Errorf("got %d lines, want a header plus 2 commits:\n%s", n, stdout.String())
+	if n := strings.Count(stdout.String(), "\n"); n != 4 {
+		t.Errorf("got %d lines, want a header, 2 commits and the average footer:\n%s",
+			n, stdout.String())
 	}
 }
 
@@ -367,8 +369,8 @@ func TestExecuteComposesConsoleAndFileSinks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("file sink output is not valid CSV: %v", err)
 	}
-	if len(rows) != 3 {
-		t.Errorf("got %d CSV rows, want a header plus 2 commits", len(rows))
+	if len(rows) != 4 {
+		t.Errorf("got %d CSV rows, want a header, 2 commits and the average footer", len(rows))
 	}
 }
 
@@ -407,9 +409,10 @@ func TestExecuteBucketsEverySinkByGranularity(t *testing.T) {
 				t.Fatalf("execute() error = %v", err)
 			}
 
+			// A header and an average footer bracket the buckets in both sinks.
 			lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
-			if len(lines) != tt.buckets+1 {
-				t.Errorf("console printed %d lines, want a header plus %d buckets:\n%s",
+			if len(lines) != tt.buckets+2 {
+				t.Errorf("console printed %d lines, want a header, %d buckets and a footer:\n%s",
 					len(lines), tt.buckets, stdout.String())
 			}
 
@@ -417,8 +420,8 @@ func TestExecuteBucketsEverySinkByGranularity(t *testing.T) {
 			if err != nil {
 				t.Fatalf("file sink output is not valid CSV: %v", err)
 			}
-			if len(rows) != tt.buckets+1 {
-				t.Errorf("got %d CSV rows, want a header plus %d buckets", len(rows), tt.buckets)
+			if len(rows) != tt.buckets+2 {
+				t.Errorf("got %d CSV rows, want a header, %d buckets and a footer", len(rows), tt.buckets)
 			}
 			// The two sinks are fed by one aggregator, so they cannot disagree.
 			if len(rows) != len(lines) {

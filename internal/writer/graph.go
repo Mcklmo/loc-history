@@ -93,6 +93,10 @@ func (g *Graph) Write(b bucket.Bucket) error {
 	return nil
 }
 
+// Summary is dropped on purpose: the charts plot the level the tree stood at,
+// and a mean of the row deltas has nowhere to sit on that axis.
+func (g *Graph) Summary(report.AverageDelta) error { return nil }
+
 // Close renders the page.
 func (g *Graph) Close() error {
 	page := g.build()

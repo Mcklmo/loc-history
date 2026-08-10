@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/mcklmo/loc-history/internal/bucket"
+	"github.com/mcklmo/loc-history/internal/report"
 )
 
 // subjectWidth caps the last column so a verbose commit message cannot wrap the
@@ -16,7 +17,8 @@ const subjectWidth = 60
 // rowFmt keeps every cell a string so skipped buckets can render a dash where a
 // number would otherwise go. Widths are tuned to the header labels; the first
 // field is 16 wide because that is what a bucket start costs (2026-03-04 12:00).
-const rowFmt = "%-16s  %-7s  %7s  %7s  %6s  %8s  %6s  %s\n"
+// fmt pads strings by rune count, so the Δ in a label still aligns.
+const rowFmt = "%-16s  %-7s  %7s  %7s  %6s  %8s  %9s  %7s  %8s  %s\n"
 
 // Console streams one line per time bucket to a terminal as the walk
 // progresses, rather than buffering until the end.
@@ -36,7 +38,8 @@ func (c *Console) Write(b bucket.Bucket) error {
 	if !c.headerWritten {
 		if _, err := fmt.Fprintf(c.w, rowFmt,
 			strings.ToUpper(b.Gran.Column()), "SHA", "COMMITS",
-			"PRODUCT", "TEST", "TOTAL", "Δ", "SUBJECT"); err != nil {
+			"PRODUCT", "TEST", "TOTAL",
+			"PRODUCT Δ", "TEST Δ", "Δ", "SUBJECT"); err != nil {
 			return fmt.Errorf("console: write header: %w", err)
 		}
 		c.headerWritten = true
@@ -60,11 +63,37 @@ func (c *Console) Write(b bucket.Bucket) error {
 		product,
 		test,
 		total,
+		// The deltas print even on a skipped row: the snapshot has nothing to
+		// report, but the change to it does.
+		fmt.Sprintf("%+d", b.ProductDelta),
+		fmt.Sprintf("%+d", b.TestDelta),
 		fmt.Sprintf("%+d", b.Delta),
 		truncate(last.Subject, subjectWidth),
 	)
 	if err != nil {
 		return fmt.Errorf("console: write bucket %s: %w", b.Start.Format(b.Gran.RowFormat()), err)
+	}
+	return nil
+}
+
+// Summary closes the table with one more row in the same format, so the three
+// means land under the delta columns they average. It no-ops when no header was
+// written, so nothing can print a lone footer.
+func (c *Console) Summary(avg report.AverageDelta) error {
+	if !c.headerWritten {
+		return nil
+	}
+
+	_, err := fmt.Fprintf(c.w, rowFmt,
+		"AVERAGE Δ",
+		"-", "-", "-", "-", "-",
+		fmt.Sprintf("%+d", avg.Product),
+		fmt.Sprintf("%+d", avg.Test),
+		fmt.Sprintf("%+d", avg.TotalCode),
+		"mean Δ per row",
+	)
+	if err != nil {
+		return fmt.Errorf("console: write summary: %w", err)
 	}
 	return nil
 }

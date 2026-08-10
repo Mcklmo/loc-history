@@ -36,8 +36,6 @@ type Bucket struct {
 	Skipped bool `json:"skipped"`
 
 	Records []report.Record `json:"records"`
-
-	AverageDelta report.AverageDelta `json:"average_delta"` // mean of the bucket's records
 }
 
 // Last is the commit a bucket takes its identity from. A bucket only exists
@@ -48,6 +46,9 @@ func (b Bucket) Last() report.Record { return b.Records[len(b.Records)-1] }
 // this package never imports writer and there is no cycle.
 type Sink interface {
 	Write(Bucket) error
+	// Summary is the run-level footer, handed over after the last bucket and
+	// before Close. A sink that plots levels rather than means may ignore it.
+	Summary(report.AverageDelta) error
 	Close() error
 }
 
@@ -68,6 +69,13 @@ type Aggregator struct {
 	// Record.Finalize's prevTotal convention, which is what makes
 	// ProductDelta + TestDelta == Delta hold.
 	prevProduct, prevTest int
+
+	// Running totals behind the run-level summary, taken from each bucket as it
+	// is handed over, so nothing is buffered to compute them. rows is the
+	// denominator: output rows, not commits — a day holding five commits
+	// contributes one row, and a skipped bucket contributes one too, because its
+	// drop to zero is a real change.
+	sumProduct, sumTest, sumTotal, rows int
 }
 
 // NewAggregator returns an Aggregator feeding sink.
@@ -119,14 +127,33 @@ func (a *Aggregator) Write(r report.Record) error {
 	return nil
 }
 
-// Close flushes the open bucket and then closes the sink *regardless* of
-// whether that flush failed, so the close-exactly-once guarantee the pipeline
-// relies on survives a broken sink. An empty run flushes nothing and still
-// closes.
+// Close flushes the open bucket, hands the sink the run-level average, and then
+// closes it *regardless* of whether either failed, so the close-exactly-once
+// guarantee the pipeline relies on survives a broken sink. An empty run flushes
+// nothing, summarises nothing, and still closes.
 func (a *Aggregator) Close() error {
 	flushErr := a.flush()
+
+	// No rows, no mean: a footer over nothing would be a row of zeroes posing as
+	// a measurement.
+	var summaryErr error
+	if a.rows > 0 {
+		summaryErr = a.sink.Summary(a.average())
+	}
+
 	closeErr := a.sink.Close()
-	return errors.Join(flushErr, closeErr)
+	return errors.Join(flushErr, summaryErr, closeErr)
+}
+
+// average is the mean change per row. Each column is divided independently, so
+// truncation can leave Product + Test one off TotalCode — unlike the exact
+// per-bucket invariant on Bucket, which is a sum rather than a mean.
+func (a *Aggregator) average() report.AverageDelta {
+	return report.AverageDelta{
+		Product:   a.sumProduct / a.rows,
+		Test:      a.sumTest / a.rows,
+		TotalCode: a.sumTotal / a.rows,
+	}
 }
 
 func (a *Aggregator) flush() error {
@@ -135,5 +162,13 @@ func (a *Aggregator) flush() error {
 	}
 	b := *a.open
 	a.open = nil
+
+	// The row exists whether or not the sink accepts it, so it counts towards
+	// the average either way.
+	a.sumProduct += b.ProductDelta
+	a.sumTest += b.TestDelta
+	a.sumTotal += b.Delta
+	a.rows++
+
 	return a.sink.Write(b)
 }
