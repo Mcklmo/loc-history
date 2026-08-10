@@ -68,7 +68,7 @@ type File struct {
 }
 
 // NewFile opens path for writing, creating parent directories as needed.
-func NewFile(path string, format Format) (*File, error) {
+func NewFile(path string, format Format) (Writer, error) {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("create output directory %s: %w", dir, err)

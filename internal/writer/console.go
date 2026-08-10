@@ -26,7 +26,7 @@ type Console struct {
 }
 
 // NewConsole returns a Console that streams to w.
-func NewConsole(w io.Writer) *Console {
+func NewConsole(w io.Writer) Writer {
 	return &Console{w: w}
 }
 

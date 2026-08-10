@@ -68,7 +68,7 @@ type Graph struct {
 }
 
 // NewGraph prepares a graph sink writing to path.
-func NewGraph(path string, opts GraphOptions) (*Graph, error) {
+func NewGraph(path string, opts GraphOptions) (Writer, error) {
 	if opts.Title == "" {
 		opts.Title = "loc-history"
 	}

@@ -36,6 +36,8 @@ type Bucket struct {
 	Skipped bool `json:"skipped"`
 
 	Records []report.Record `json:"records"`
+
+	AverageDelta report.AverageDelta `json:"average_delta"` // mean of the bucket's records
 }
 
 // Last is the commit a bucket takes its identity from. A bucket only exists

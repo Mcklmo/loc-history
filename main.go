@@ -253,6 +253,7 @@ func execute(ctx context.Context, cfg config, runner cloc.Runner, stdout, stderr
 	// The aggregator is the granularity gate: it sits between the pipeline and
 	// every sink, so none of them has to know what a bucket is.
 	sink := writer.MultiWriter(sinks...)
+
 	agg, err := bucket.NewAggregator(cfg.Granularity, sink)
 	if err != nil {
 		sink.Close()
@@ -260,20 +261,26 @@ func execute(ctx context.Context, cfg config, runner cloc.Runner, stdout, stderr
 	}
 
 	start := time.Now()
-	stats, err := pipeline.Run(ctx, commits, runner, agg, pipeline.Options{
-		Repo:      cfg.Repo,
-		Folder:    cfg.Folder,
-		TestRegex: cfg.TestRegex,
-		Image:     cfg.Image,
-		Jobs:      cfg.Jobs,
-		WorkDir:   cfg.WorkDir,
-		FailFast:  cfg.FailFast,
+	stats, err := pipeline.Run(
+		ctx,
+		commits,
+		runner,
+		agg,
+		pipeline.Options{
+			Repo:      cfg.Repo,
+			Folder:    cfg.Folder,
+			TestRegex: cfg.TestRegex,
+			Image:     cfg.Image,
+			Jobs:      cfg.Jobs,
+			WorkDir:   cfg.WorkDir,
+			FailFast:  cfg.FailFast,
 
-		Cache:       store,
-		ClocVersion: clocVersion,
+			Cache:       store,
+			ClocVersion: clocVersion,
 
-		ErrOut: stderr,
-	})
+			ErrOut: stderr,
+		},
+	)
 
 	fmt.Fprintf(stderr, "%d commits, %d skipped, %d failed in %s\n",
 		len(commits), stats.Skipped, stats.Failed, time.Since(start).Truncate(time.Millisecond))

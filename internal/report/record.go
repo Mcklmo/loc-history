@@ -50,6 +50,43 @@ type Record struct {
 	Skipped   bool `json:"skipped"`    // source folder absent at this commit
 }
 
+// AverageDelta is the mean of a bucket's records, used to draw the graph's lines. It
+// is not a record itself, so it is not in the Records slice. It could be placed in the bottom of a csv output
+type AverageDelta struct {
+	Product   Count `json:"product_average_delta"`
+	Test      Count `json:"test_average_delta"`
+	TotalCode int   `json:"total_code_average_delta"` // Product.Code + Test.Code
+}
+
+func Average(records []Record) AverageDelta {
+	var avg AverageDelta
+
+	if len(records) == 0 {
+		return avg
+	}
+
+	for _, r := range records {
+		avg.Product = avg.Product.Add(r.Product)
+		avg.Test = avg.Test.Add(r.Test)
+		avg.TotalCode += r.TotalCode
+	}
+
+	n := len(records)
+	avg.Product.Files /= n
+	avg.Product.Code /= n
+	avg.Product.Comment /= n
+	avg.Product.Blank /= n
+
+	avg.Test.Files /= n
+	avg.Test.Code /= n
+	avg.Test.Comment /= n
+	avg.Test.Blank /= n
+
+	avg.TotalCode /= n
+
+	return avg
+}
+
 // NewRecord starts a record from a commit. Counts are filled in later by the
 // pipeline, and TotalCode and Delta by Finalize.
 func NewRecord(c Commit) Record {
